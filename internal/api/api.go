@@ -134,13 +134,20 @@ func (s *Server) views(ctx context.Context) ([]view, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A missing or broken pm2 must not blank the list. The instances are still
+	// real; only their live status is unknown, and the settings screen is where
+	// that gets fixed.
 	apps, err := s.client().List(ctx)
 	if err != nil {
-		return nil, err
+		out := make([]view, 0, len(insts))
+		for _, i := range insts {
+			out = append(out, view{Instance: i, Status: "unknown"})
+		}
+		return out, nil
 	}
 	out := make([]view, 0, len(insts))
 	for _, i := range insts {
-		v := view{Instance: i, Status: "unregistered"}
+		v := view{Instance: i, Status: "not_started"}
 		if a, ok := apps[i.Name]; ok {
 			v.Known, v.Status, v.PID = true, a.Status, a.PID
 			v.MemoryMB, v.CPUPct, v.UptimeMS, v.Restarts = a.MemoryMB, a.CPUPct, a.UptimeMS, a.Restarts
@@ -165,7 +172,7 @@ func (s *Server) getInstance(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	v := view{Instance: i, Status: "unregistered"}
+	v := view{Instance: i, Status: "not_started"}
 	if apps, err := s.client().List(r.Context()); err == nil {
 		if a, ok := apps[name]; ok {
 			v.Known, v.Status, v.PID = true, a.Status, a.PID

@@ -78,8 +78,11 @@ func Detect(ctx context.Context) Settings {
 	return s
 }
 
-// findPM2 asks a login shell first. That is the only way to see what n, nvm,
-// fnm or volta put on PATH, and it is exactly what a plain exec.LookPath misses.
+// findPM2 asks a login shell first, then falls back to globbing the known
+// install layouts. The fallback is not decoration: on the Oracle box n exports
+// its PATH from ~/.bashrc, and a non-interactive `bash -lc` bails out of that
+// file before reaching the line, so the login shell finds nothing and only the
+// ~/n/bin glob does.
 func findPM2(ctx context.Context) string {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()

@@ -38,7 +38,9 @@ export default function App() {
 function dot(status: string) {
   if (status === "online") return "bg-live";
   if (status === "errored") return "bg-bad";
-  if (status === "unregistered") return "bg-warn";
+  // unknown means pm2 could not be reached, which is a problem. not_started
+  // just means this instance has never been launched through Conduit.
+  if (status === "unknown") return "bg-warn";
   return "bg-dead";
 }
 

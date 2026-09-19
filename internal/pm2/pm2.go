@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -61,7 +62,14 @@ func (c *Client) cmd(ctx context.Context, args ...string) *exec.Cmd {
 	return cmd
 }
 
+// ErrNotFound means pm2 was never located. Callers show the settings screen
+// rather than treating it as a broken machine.
+var ErrNotFound = errors.New("pm2 not found, set its path in settings")
+
 func (c *Client) run(ctx context.Context, args ...string) ([]byte, error) {
+	if c.bin == "" {
+		return nil, ErrNotFound
+	}
 	var out, errb bytes.Buffer
 	cmd := c.cmd(ctx, args...)
 	cmd.Stdout = &out
