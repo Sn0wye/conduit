@@ -1,6 +1,7 @@
-// Command conduitd manages the Minecraft servers on one machine and serves the
-// PWA that drives them. Every machine runs an identical copy; there is no
-// central control plane.
+// Command conduitd manages the Minecraft servers on the machine it runs on and
+// serves the PWA that drives them. One binary per machine, reached over the
+// tailnet at its own hostname. There is no control plane, no peer list and no
+// config file: paths are detected, and the settings screen overrides them.
 package main
 
 import (
@@ -13,74 +14,78 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/snowye/conduit/internal/api"
-	"github.com/snowye/conduit/internal/config"
-	"github.com/snowye/conduit/internal/pm2"
+	"github.com/snowye/conduit/internal/settings"
 	"github.com/snowye/conduit/internal/store"
 	"github.com/snowye/conduit/internal/tsnetsrv"
 	webui "github.com/snowye/conduit/web"
 )
 
 func main() {
-	home, _ := os.UserHomeDir()
 	var (
-		cfgPath = flag.String("config", filepath.Join(home, ".conduit", "config.json"), "config file")
-		authKey = flag.String("authkey", os.Getenv("TS_AUTHKEY"), "tailscale auth key, first run only")
+		authKey = flag.String("authkey", os.Getenv("TS_AUTHKEY"), "tailscale auth key, optional; without it the first run prints a login URL")
+		claim   = flag.String("claim", "", "reset the owning tailnet login and exit")
 		dev     = flag.Bool("dev", false, "serve plain http on localhost and skip tailnet identity")
 		devAddr = flag.String("dev-addr", "127.0.0.1:8420", "listen address in dev mode")
 	)
 	flag.Parse()
 
-	if err := run(*cfgPath, *authKey, *dev, *devAddr); err != nil {
+	if err := run(*authKey, *claim, *dev, *devAddr); err != nil {
 		log.Fatalf("conduitd: %v", err)
 	}
 }
 
-func run(cfgPath, authKey string, dev bool, devAddr string) error {
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
+func run(authKey, claim string, dev bool, devAddr string) error {
+	if err := settings.EnsureDirs(); err != nil {
 		return err
 	}
-	if err := cfg.EnsureDirs(); err != nil {
-		return err
-	}
-
-	db, err := store.Open(cfg.DBPath())
+	db, err := store.Open(settings.DBPath())
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 
-	pm := pm2.New(cfg.PM2Bin, cfg.NodeBinDir)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Fail loudly at startup rather than on the first start request. pm2 is a
-	// node script, so a missing node_bin_dir breaks it even when pm2_bin is a
-	// correct absolute path.
-	if v, err := pm.Version(ctx); err != nil {
-		log.Printf("warning: pm2 is not usable: %v", err)
-	} else {
-		log.Printf("pm2 %s at %s", v, cfg.PM2Bin)
+	if claim != "" {
+		if err := db.SetSetting(ctx, settings.KeyOwner, claim); err != nil {
+			return err
+		}
+		log.Printf("this machine now belongs to %s", claim)
+		return nil
 	}
 
-	apiSrv := api.New(cfg, db, pm)
+	set, err := settings.Load(ctx, db)
+	if err != nil {
+		return err
+	}
+	apiSrv := api.New(db, set)
+
+	// Fail loudly at startup rather than on the first start request. pm2 is a
+	// node script, so a missing node_bin_dir breaks it even when the pm2 path
+	// itself is correct.
+	if set.PM2Bin == "" {
+		log.Printf("warning: pm2 not found, set its path in the settings screen")
+	} else {
+		log.Printf("pm2 at %s", set.PM2Bin)
+	}
+	log.Printf("servers root %s", set.ServersRoot)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", webui.Handler())
 
 	if dev {
 		id := func(context.Context, string) (string, error) { return "dev", nil }
-		mux.Handle("/v1/", api.CORS("")(api.Auth(id, nil)(apiSrv.Routes())))
+		mux.Handle("/v1/", api.DevCORS(api.Auth(id, nil)(apiSrv.Routes())))
 		log.Printf("dev mode on http://%s", devAddr)
 		return serve(ctx, &http.Server{Addr: devAddr, Handler: mux}, nil)
 	}
 
-	ts, err := tsnetsrv.Start(ctx, cfg.NodeName, cfg.StateDir, authKey)
+	ts, err := tsnetsrv.Start(ctx, settings.NodeName(), settings.TsnetDir(), authKey)
 	if err != nil {
 		return err
 	}
@@ -90,7 +95,8 @@ func run(cfgPath, authKey string, dev bool, devAddr string) error {
 	if err != nil {
 		return err
 	}
-	mux.Handle("/v1/", api.CORS(ts.Tailnet(ctx))(api.Auth(ts.WhoIs, cfg.AllowUsers)(apiSrv.Routes())))
+	// The PWA and the API share this origin, so no CORS middleware is needed.
+	mux.Handle("/v1/", api.Auth(ts.WhoIs, db)(apiSrv.Routes()))
 
 	ln, err := ts.ListenTLS(":443")
 	if err != nil {

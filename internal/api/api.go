@@ -12,21 +12,41 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/snowye/conduit/internal/config"
 	"github.com/snowye/conduit/internal/pm2"
+	"github.com/snowye/conduit/internal/settings"
 	"github.com/snowye/conduit/internal/store"
 )
 
+// Server drives the one machine it runs on. There is no fan-out and no peer
+// list: the PWA it serves talks to this agent and nothing else.
 type Server struct {
-	cfg config.Config
-	db  *store.DB
+	db *store.DB
+
+	// mu guards set and pm together. Changing the pm2 path from the settings
+	// screen rebuilds the client, and requests in flight must not see a
+	// half-updated pair.
+	mu  sync.RWMutex
+	set settings.Settings
 	pm  *pm2.Client
 }
 
-func New(cfg config.Config, db *store.DB, pm *pm2.Client) *Server {
-	return &Server{cfg: cfg, db: db, pm: pm}
+func New(db *store.DB, set settings.Settings) *Server {
+	return &Server{db: db, set: set, pm: pm2.New(set.PM2Bin, set.NodeBinDir)}
+}
+
+func (s *Server) client() *pm2.Client {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.pm
+}
+
+func (s *Server) settings() settings.Settings {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.set
 }
 
 type apiError struct {
@@ -70,6 +90,8 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/instances/{name}/stop", handle(s.stop))
 	mux.HandleFunc("POST /v1/instances/{name}/restart", handle(s.restart))
 	mux.HandleFunc("GET /v1/instances/{name}/logs", handle(s.logs))
+	mux.HandleFunc("GET /v1/settings", handle(s.getSettings))
+	mux.HandleFunc("PATCH /v1/settings", handle(s.patchSettings))
 	return mux
 }
 
@@ -77,9 +99,9 @@ func (s *Server) Routes() *http.ServeMux {
 
 func (s *Server) info(w http.ResponseWriter, r *http.Request) error {
 	host, _ := os.Hostname()
-	ver, pmErr := s.pm.Version(r.Context())
+	ver, pmErr := s.client().Version(r.Context())
 	out := map[string]any{
-		"node":     s.cfg.NodeName,
+		"node":     settings.NodeName(),
 		"hostname": host,
 		"os":       runtime.GOOS,
 		"arch":     runtime.GOARCH,
@@ -112,7 +134,7 @@ func (s *Server) views(ctx context.Context) ([]view, error) {
 	if err != nil {
 		return nil, err
 	}
-	apps, err := s.pm.List(ctx)
+	apps, err := s.client().List(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +166,7 @@ func (s *Server) getInstance(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	v := view{Instance: i, Status: "unregistered"}
-	if apps, err := s.pm.List(r.Context()); err == nil {
+	if apps, err := s.client().List(r.Context()); err == nil {
 		if a, ok := apps[name]; ok {
 			v.Known, v.Status, v.PID = true, a.Status, a.PID
 			v.MemoryMB, v.CPUPct, v.UptimeMS, v.Restarts = a.MemoryMB, a.CPUPct, a.UptimeMS, a.Restarts
@@ -211,7 +233,7 @@ func (s *Server) scan(w http.ResponseWriter, r *http.Request) error {
 			Port: 25565, RCONPort: 25575})
 	}
 
-	if apps, err := s.pm.List(r.Context()); err == nil {
+	if apps, err := s.client().List(r.Context()); err == nil {
 		names := make([]string, 0, len(apps))
 		for n := range apps {
 			names = append(names, n)
@@ -221,13 +243,13 @@ func (s *Server) scan(w http.ResponseWriter, r *http.Request) error {
 			add(n, apps[n].Dir)
 		}
 	}
-	if s.cfg.ServersRoot != "" {
-		entries, _ := os.ReadDir(s.cfg.ServersRoot)
+	if root := s.settings().ServersRoot; root != "" {
+		entries, _ := os.ReadDir(root)
 		for _, e := range entries {
 			if !e.IsDir() {
 				continue
 			}
-			dir := filepath.Join(s.cfg.ServersRoot, e.Name())
+			dir := filepath.Join(root, e.Name())
 			if _, err := os.Stat(filepath.Join(dir, "run.sh")); err != nil {
 				continue // not a Forge or NeoForge server directory
 			}
@@ -258,7 +280,7 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	apps, err := s.pm.List(ctx)
+	apps, err := s.client().List(ctx)
 	if err != nil {
 		return err
 	}
@@ -278,11 +300,11 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request) error {
 	if _, ok := apps[name]; ok {
 		// pm2 already has the app registered from a previous run, so reuse it
 		// rather than creating a duplicate entry with different flags.
-		if err := s.pm.Delete(ctx, name); err != nil {
+		if err := s.client().Delete(ctx, name); err != nil {
 			return err
 		}
 	}
-	if err := s.pm.Start(ctx, name, inst.Dir, inst.Script); err != nil {
+	if err := s.client().Start(ctx, name, inst.Dir, inst.Script); err != nil {
 		return err
 	}
 	writeJSON(w, 200, map[string]any{"name": name, "started": true, "stopped_first": stopped})
@@ -293,10 +315,10 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request) error {
 // SIGINT and Minecraft's own shutdown handler saving the world. Once RCON is
 // enabled per instance this sends "stop" first and waits for a clean exit.
 func (s *Server) stopApp(ctx context.Context, name string) error {
-	if err := s.pm.Stop(ctx, name); err != nil {
+	if err := s.client().Stop(ctx, name); err != nil {
 		return err
 	}
-	return s.pm.WaitStopped(ctx, name, 130*time.Second)
+	return s.client().WaitStopped(ctx, name, 130*time.Second)
 }
 
 func (s *Server) stop(w http.ResponseWriter, r *http.Request) error {
@@ -321,10 +343,10 @@ func (s *Server) restart(w http.ResponseWriter, r *http.Request) error {
 	if err := s.stopApp(ctx, name); err != nil {
 		return err
 	}
-	if err := s.pm.Delete(ctx, name); err != nil {
+	if err := s.client().Delete(ctx, name); err != nil {
 		return err
 	}
-	if err := s.pm.Start(ctx, name, inst.Dir, inst.Script); err != nil {
+	if err := s.client().Start(ctx, name, inst.Dir, inst.Script); err != nil {
 		return err
 	}
 	writeJSON(w, 200, map[string]any{"name": name, "restarted": true})
@@ -366,4 +388,65 @@ func tailFile(path string, n int) (string, error) {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, "\n"), nil
+}
+
+// --- settings ---
+
+func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) error {
+	cur := s.settings()
+	owner, err := s.db.Setting(r.Context(), settings.KeyOwner)
+	if err != nil {
+		return err
+	}
+	writeJSON(w, 200, map[string]any{
+		"pm2_bin":            cur.PM2Bin,
+		"node_bin_dir":       cur.NodeBinDir,
+		"servers_root":       cur.ServersRoot,
+		"has_curseforge_key": cur.HasCurseForgeKey,
+		"detected":           cur.Detected,
+		"owner":              owner,
+	})
+	return nil
+}
+
+// patchSettings writes only the fields present in the body, so clearing the
+// CurseForge key needs an explicit empty string rather than a missing field.
+// An empty value deletes the override and detection takes over again.
+func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) error {
+	var body map[string]*string
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		fail(w, 400, "bad_request", err)
+		return nil
+	}
+	allowed := map[string]bool{
+		settings.KeyPM2Bin: true, settings.KeyNodeBinDir: true,
+		settings.KeyServersRoot: true, settings.KeyCurseForgeKey: true,
+		settings.KeyOwner: true,
+	}
+	for k, v := range body {
+		if !allowed[k] || v == nil {
+			continue
+		}
+		if err := s.db.SetSetting(r.Context(), k, strings.TrimSpace(*v)); err != nil {
+			return err
+		}
+	}
+	if err := s.Reload(r.Context()); err != nil {
+		return err
+	}
+	return s.getSettings(w, r)
+}
+
+// Reload re-runs detection, re-applies the stored overrides and rebuilds the
+// pm2 client against whatever path won.
+func (s *Server) Reload(ctx context.Context) error {
+	next, err := settings.Load(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.set = next
+	s.pm = pm2.New(next.PM2Bin, next.NodeBinDir)
+	return nil
 }

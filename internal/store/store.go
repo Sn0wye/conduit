@@ -43,6 +43,10 @@ func Open(path string) (*DB, error) {
 		sq.Close()
 		return nil, err
 	}
+	if err := db.migrateSettings(); err != nil {
+		sq.Close()
+		return nil, err
+	}
 	return db, nil
 }
 
@@ -141,4 +145,56 @@ func (d *DB) DeleteInstance(ctx context.Context, name string) error {
 		return fmt.Errorf("instance %q: %w", name, ErrNotFound)
 	}
 	return nil
+}
+
+// --- settings ---
+//
+// Settings live in a key/value table rather than a config file: everything is
+// set from the PWA, and the file would be a second place to look.
+
+func (d *DB) migrateSettings() error {
+	_, err := d.sql.Exec(`
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);`)
+	return err
+}
+
+// Setting returns the empty string when the key was never set.
+func (d *DB) Setting(ctx context.Context, key string) (string, error) {
+	var v string
+	err := d.sql.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return v, err
+}
+
+func (d *DB) SetSetting(ctx context.Context, key, value string) error {
+	if value == "" {
+		_, err := d.sql.ExecContext(ctx, `DELETE FROM settings WHERE key = ?`, key)
+		return err
+	}
+	_, err := d.sql.ExecContext(ctx,
+		`INSERT INTO settings (key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	return err
+}
+
+func (d *DB) Settings(ctx context.Context) (map[string]string, error) {
+	rows, err := d.sql.QueryContext(ctx, `SELECT key, value FROM settings`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		out[k] = v
+	}
+	return out, rows.Err()
 }

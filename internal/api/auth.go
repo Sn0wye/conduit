@@ -4,8 +4,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"slices"
 	"strings"
+
+	"github.com/snowye/conduit/internal/settings"
 )
 
 type ctxKey int
@@ -21,10 +22,19 @@ func userFrom(ctx context.Context) string {
 // backed by WhoIs; in dev mode it returns a fixed local user.
 type Identify func(ctx context.Context, remoteAddr string) (string, error)
 
+// Owner stores which tailnet login claimed this machine.
+type Owner interface {
+	Setting(ctx context.Context, key string) (string, error)
+	SetSetting(ctx context.Context, key, value string) error
+}
+
 // Auth is the only access control in Conduit. The agent listens on the tsnet
-// interface alone, so the tailnet ACL is the real boundary; this just narrows
-// it to one login.
-func Auth(id Identify, allow []string) func(http.Handler) http.Handler {
+// interface alone, so the tailnet ACL is the real boundary. On top of that the
+// first login to call the machine claims it and everyone else gets 403.
+//
+// Pass a nil Owner to skip the claim check entirely, which is what dev mode
+// does so a local run never writes "dev" into the database.
+func Auth(id Identify, owner Owner) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			user, err := id(r.Context(), r.RemoteAddr)
@@ -32,35 +42,46 @@ func Auth(id Identify, allow []string) func(http.Handler) http.Handler {
 				fail(w, http.StatusForbidden, "whois_failed", err)
 				return
 			}
-			if len(allow) > 0 && !slices.Contains(allow, user) {
-				fail(w, http.StatusForbidden, "not_allowed", errors.New(user+" is not in allow_users"))
-				return
+			if owner != nil {
+				claimed, err := owner.Setting(r.Context(), settings.KeyOwner)
+				if err != nil {
+					fail(w, http.StatusInternalServerError, "internal", err)
+					return
+				}
+				switch claimed {
+				case "":
+					if err := owner.SetSetting(r.Context(), settings.KeyOwner, user); err != nil {
+						fail(w, http.StatusInternalServerError, "internal", err)
+						return
+					}
+				case user:
+				default:
+					fail(w, http.StatusForbidden, "not_owner",
+						errors.New("this machine belongs to "+claimed))
+					return
+				}
 			}
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey, user)))
 		})
 	}
 }
 
-// CORS lets a PWA served by one agent call the others. Auth is network level,
-// so no credentials ride along and the check stays simple.
-func CORS(tailnet string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			origin := r.Header.Get("Origin")
-			ok := origin == "" ||
-				strings.HasPrefix(origin, "http://localhost:") ||
-				(tailnet != "" && strings.HasSuffix(origin, "."+tailnet))
-			if ok && origin != "" {
-				w.Header().Set("Access-Control-Allow-Origin", origin)
-				w.Header().Set("Vary", "Origin")
-				w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-			}
-			if r.Method == http.MethodOptions {
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
+// DevCORS exists for `bun run dev`, where the PWA is served by Vite on
+// localhost and the API by conduitd on another port. In tailnet mode the PWA
+// and the API share an origin, so no CORS headers are sent at all.
+func DevCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); strings.HasPrefix(origin, "http://localhost:") ||
+			strings.HasPrefix(origin, "http://127.0.0.1:") {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		}
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

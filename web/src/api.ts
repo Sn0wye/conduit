@@ -1,8 +1,6 @@
-// Every machine runs the same agent, so the browser talks to each one directly.
-// The machine list is typed in by hand and kept in localStorage: under five
-// boxes does not justify discovery.
-
-export type Machine = { name: string; url: string };
+// The PWA is served by the agent it talks to, so every call is same origin and
+// there is no machine list. A second machine is a second URL with its own
+// installed copy of this app.
 
 export type Instance = {
   name: string;
@@ -29,22 +27,27 @@ export type Info = {
   user: string;
 };
 
-const KEY = "conduit.machines";
+export type Settings = {
+  pm2_bin: string;
+  node_bin_dir: string;
+  servers_root: string;
+  has_curseforge_key: boolean;
+  detected: Record<string, boolean>;
+  owner: string;
+};
 
-export function loadMachines(): Machine[] {
-  try {
-    return JSON.parse(localStorage.getItem(KEY) ?? "[]");
-  } catch {
-    return [];
-  }
-}
+// An empty string clears an override and hands the field back to detection, so
+// omitted and empty mean different things here.
+export type SettingsPatch = Partial<{
+  pm2_bin: string;
+  node_bin_dir: string;
+  servers_root: string;
+  curseforge_key: string;
+  owner: string;
+}>;
 
-export function saveMachines(m: Machine[]) {
-  localStorage.setItem(KEY, JSON.stringify(m));
-}
-
-async function call<T>(base: string, path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(base.replace(/\/$/, "") + path, {
+async function call<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(path, {
     ...init,
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
   });
@@ -62,19 +65,19 @@ async function call<T>(base: string, path: string, init?: RequestInit): Promise<
 }
 
 export const api = {
-  info: (base: string) => call<Info>(base, "/v1/info"),
-  instances: (base: string) => call<Instance[]>(base, "/v1/instances"),
-  scan: (base: string) => call<Instance[]>(base, "/v1/instances/scan"),
-  register: (base: string, body: Partial<Instance>) =>
-    call<Instance>(base, "/v1/instances", { method: "POST", body: JSON.stringify(body) }),
-  start: (base: string, name: string) =>
-    call<unknown>(base, `/v1/instances/${name}/start`, { method: "POST" }),
-  stop: (base: string, name: string) =>
-    call<unknown>(base, `/v1/instances/${name}/stop`, { method: "POST" }),
-  restart: (base: string, name: string) =>
-    call<unknown>(base, `/v1/instances/${name}/restart`, { method: "POST" }),
-  logs: async (base: string, name: string, tail = 300) => {
-    const res = await fetch(`${base.replace(/\/$/, "")}/v1/instances/${name}/logs?tail=${tail}`);
+  info: () => call<Info>("/v1/info"),
+  instances: () => call<Instance[]>("/v1/instances"),
+  scan: () => call<Instance[]>("/v1/instances/scan"),
+  register: (body: Partial<Instance>) =>
+    call<Instance>("/v1/instances", { method: "POST", body: JSON.stringify(body) }),
+  start: (name: string) => call<unknown>(`/v1/instances/${name}/start`, { method: "POST" }),
+  stop: (name: string) => call<unknown>(`/v1/instances/${name}/stop`, { method: "POST" }),
+  restart: (name: string) => call<unknown>(`/v1/instances/${name}/restart`, { method: "POST" }),
+  settings: () => call<Settings>("/v1/settings"),
+  saveSettings: (body: SettingsPatch) =>
+    call<Settings>("/v1/settings", { method: "PATCH", body: JSON.stringify(body) }),
+  logs: async (name: string, tail = 300) => {
+    const res = await fetch(`/v1/instances/${name}/logs?tail=${tail}`);
     if (!res.ok) throw new Error(await res.text());
     return res.text();
   },

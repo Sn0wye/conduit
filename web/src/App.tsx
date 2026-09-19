@@ -1,109 +1,37 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, loadMachines, saveMachines, uptime, type Instance, type Machine } from "./api";
+import { api, uptime, type Instance, type SettingsPatch } from "./api";
+
+type Screen = { view: "list" } | { view: "detail"; name: string } | { view: "settings" };
 
 export default function App() {
-  const [machines, setMachines] = useState<Machine[]>(loadMachines);
-  const [active, setActive] = useState(0);
-  const [selected, setSelected] = useState<string | null>(null);
-
-  useEffect(() => saveMachines(machines), [machines]);
-
-  const base = machines[active]?.url ?? "";
-
-  if (machines.length === 0) {
-    return <AddMachine onAdd={(m) => setMachines([m])} />;
-  }
+  const [screen, setScreen] = useState<Screen>({ view: "list" });
+  const info = useQuery({ queryKey: ["info"], queryFn: api.info });
 
   return (
     <div className="mx-auto flex h-full max-w-3xl flex-col">
-      <MachineBar
-        machines={machines}
-        active={active}
-        onPick={(i) => {
-          setActive(i);
-          setSelected(null);
-        }}
-        onAdd={(m) => setMachines([...machines, m])}
-      />
-      {selected ? (
-        <Detail base={base} name={selected} onBack={() => setSelected(null)} />
-      ) : (
-        <InstanceList base={base} onOpen={setSelected} />
+      <header className="flex items-center gap-3 border-b border-edge px-4 py-3">
+        <button onClick={() => setScreen({ view: "list" })} className="text-sm">
+          {info.data?.hostname ?? "conduit"}
+        </button>
+        <span className="flex-1" />
+        {info.data?.pm2_error && <span className="text-xs text-bad">pm2 unusable</span>}
+        <button
+          onClick={() => setScreen({ view: "settings" })}
+          className="text-xs text-mute hover:text-ink"
+        >
+          settings
+        </button>
+      </header>
+
+      {screen.view === "settings" && <SettingsScreen onBack={() => setScreen({ view: "list" })} />}
+      {screen.view === "detail" && (
+        <Detail name={screen.name} onBack={() => setScreen({ view: "list" })} />
+      )}
+      {screen.view === "list" && (
+        <InstanceList onOpen={(name) => setScreen({ view: "detail", name })} />
       )}
     </div>
-  );
-}
-
-function MachineBar({
-  machines,
-  active,
-  onPick,
-  onAdd,
-}: {
-  machines: Machine[];
-  active: number;
-  onPick: (i: number) => void;
-  onAdd: (m: Machine) => void;
-}) {
-  const [adding, setAdding] = useState(false);
-  return (
-    <header className="flex flex-wrap items-center gap-2 border-b border-edge px-4 py-3">
-      {machines.map((m, i) => (
-        <button
-          key={m.url}
-          onClick={() => onPick(i)}
-          className={`rounded-full px-3 py-1 text-sm ${
-            i === active ? "bg-ink text-bg" : "bg-panel text-mute hover:text-ink"
-          }`}
-        >
-          {m.name}
-        </button>
-      ))}
-      <button onClick={() => setAdding(true)} className="px-2 text-sm text-mute hover:text-ink">
-        +
-      </button>
-      {adding && (
-        <div className="w-full">
-          <AddMachine
-            inline
-            onAdd={(m) => {
-              onAdd(m);
-              setAdding(false);
-            }}
-          />
-        </div>
-      )}
-    </header>
-  );
-}
-
-function AddMachine({ onAdd, inline }: { onAdd: (m: Machine) => void; inline?: boolean }) {
-  const [name, setName] = useState("");
-  const [url, setUrl] = useState("");
-  return (
-    <form
-      onSubmit={(e) => {
-        e.preventDefault();
-        if (url) onAdd({ name: name || new URL(url).hostname.split(".")[0], url });
-      }}
-      className={inline ? "flex gap-2 py-2" : "mx-auto flex max-w-sm flex-col gap-3 p-8"}
-    >
-      {!inline && <h1 className="text-lg">Add a machine</h1>}
-      <input
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        placeholder="name"
-        className="rounded border border-edge bg-panel px-3 py-2 text-sm outline-none focus:border-mute"
-      />
-      <input
-        value={url}
-        onChange={(e) => setUrl(e.target.value)}
-        placeholder="https://conduit.tailnet.ts.net"
-        className="flex-1 rounded border border-edge bg-panel px-3 py-2 text-sm outline-none focus:border-mute"
-      />
-      <button className="rounded bg-ink px-3 py-2 text-sm text-bg">add</button>
-    </form>
   );
 }
 
@@ -114,22 +42,15 @@ function dot(status: string) {
   return "bg-dead";
 }
 
-function InstanceList({ base, onOpen }: { base: string; onOpen: (n: string) => void }) {
+function InstanceList({ onOpen }: { onOpen: (n: string) => void }) {
   const qc = useQueryClient();
-  const instances = useQuery({
-    queryKey: ["instances", base],
-    queryFn: () => api.instances(base),
-  });
-  const scan = useQuery({
-    queryKey: ["scan", base],
-    queryFn: () => api.scan(base),
-    refetchInterval: false,
-  });
+  const instances = useQuery({ queryKey: ["instances"], queryFn: api.instances });
+  const scan = useQuery({ queryKey: ["scan"], queryFn: api.scan, refetchInterval: false });
   const adopt = useMutation({
-    mutationFn: (i: Partial<Instance>) => api.register(base, i),
+    mutationFn: (i: Partial<Instance>) => api.register(i),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["instances", base] });
-      qc.invalidateQueries({ queryKey: ["scan", base] });
+      qc.invalidateQueries({ queryKey: ["instances"] });
+      qc.invalidateQueries({ queryKey: ["scan"] });
     },
   });
 
@@ -144,9 +65,7 @@ function InstanceList({ base, onOpen }: { base: string; onOpen: (n: string) => v
 
   return (
     <main className="flex-1 overflow-y-auto p-4">
-      <p className="mb-3 text-xs text-mute">
-        {live ? `${live} is live` : "nothing running"}
-      </p>
+      <p className="mb-3 text-xs text-mute">{live ? `${live} is live` : "nothing running"}</p>
       <ul className="space-y-1">
         {instances.data?.map((i) => (
           <li key={i.name}>
@@ -191,25 +110,22 @@ function InstanceList({ base, onOpen }: { base: string; onOpen: (n: string) => v
   );
 }
 
-function Detail({ base, name, onBack }: { base: string; name: string; onBack: () => void }) {
+function Detail({ name, onBack }: { name: string; onBack: () => void }) {
   const qc = useQueryClient();
-  const invalidate = () => qc.invalidateQueries({ queryKey: ["instances", base] });
+  const invalidate = () => qc.invalidateQueries({ queryKey: ["instances"] });
 
-  const instances = useQuery({
-    queryKey: ["instances", base],
-    queryFn: () => api.instances(base),
-  });
+  const instances = useQuery({ queryKey: ["instances"], queryFn: api.instances });
   const inst = instances.data?.find((i) => i.name === name);
 
   const logs = useQuery({
-    queryKey: ["logs", base, name],
-    queryFn: () => api.logs(base, name),
+    queryKey: ["logs", name],
+    queryFn: () => api.logs(name),
     refetchInterval: 4000,
   });
 
-  const start = useMutation({ mutationFn: () => api.start(base, name), onSuccess: invalidate });
-  const stop = useMutation({ mutationFn: () => api.stop(base, name), onSuccess: invalidate });
-  const restart = useMutation({ mutationFn: () => api.restart(base, name), onSuccess: invalidate });
+  const start = useMutation({ mutationFn: () => api.start(name), onSuccess: invalidate });
+  const stop = useMutation({ mutationFn: () => api.stop(name), onSuccess: invalidate });
+  const restart = useMutation({ mutationFn: () => api.restart(name), onSuccess: invalidate });
   const busy = start.isPending || stop.isPending || restart.isPending;
   const err = start.error ?? stop.error ?? restart.error;
 
@@ -252,9 +168,7 @@ function Detail({ base, name, onBack }: { base: string; name: string; onBack: ()
 
       {/* Starting anything stops whatever else is online first. */}
       {!online && !busy && (
-        <p className="px-4 pb-2 text-xs text-mute">
-          starting this stops whatever else is running
-        </p>
+        <p className="px-4 pb-2 text-xs text-mute">starting this stops whatever else is running</p>
       )}
 
       {err && <Problem error={err} />}
@@ -263,6 +177,138 @@ function Detail({ base, name, onBack }: { base: string; name: string; onBack: ()
         {logs.data ?? (logs.error ? String(logs.error) : "…")}
       </pre>
     </main>
+  );
+}
+
+function SettingsScreen({ onBack }: { onBack: () => void }) {
+  const qc = useQueryClient();
+  const settings = useQuery({ queryKey: ["settings"], queryFn: api.settings });
+  const save = useMutation({
+    mutationFn: (p: SettingsPatch) => api.saveSettings(p),
+    onSuccess: (s) => {
+      qc.setQueryData(["settings"], s);
+      qc.invalidateQueries({ queryKey: ["info"] });
+      qc.invalidateQueries({ queryKey: ["instances"] });
+      qc.invalidateQueries({ queryKey: ["scan"] });
+    },
+  });
+
+  const [key, setKey] = useState("");
+  const s = settings.data;
+
+  return (
+    <main className="flex-1 overflow-y-auto p-4">
+      <button onClick={onBack} className="mb-4 text-sm text-mute hover:text-ink">
+        back
+      </button>
+
+      {settings.error && <Problem error={settings.error} />}
+      {save.error && <Problem error={save.error} />}
+
+      {s && (
+        <div className="space-y-5">
+          <Field
+            label="pm2"
+            value={s.pm2_bin}
+            detected={s.detected?.pm2_bin}
+            onSave={(v) => save.mutate({ pm2_bin: v })}
+          />
+          <Field
+            label="node bin dir"
+            value={s.node_bin_dir}
+            detected={s.detected?.node_bin_dir}
+            onSave={(v) => save.mutate({ node_bin_dir: v })}
+          />
+          <Field
+            label="servers root"
+            value={s.servers_root}
+            detected={s.detected?.servers_root}
+            onSave={(v) => save.mutate({ servers_root: v })}
+          />
+
+          <div>
+            <label className="mb-1 block text-xs text-mute">
+              curseforge key {s.has_curseforge_key && "(stored)"}
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="password"
+                value={key}
+                onChange={(e) => setKey(e.target.value)}
+                placeholder={s.has_curseforge_key ? "•••• stored, paste to replace" : "paste key"}
+                className="flex-1 rounded border border-edge bg-panel px-3 py-2 text-sm outline-none focus:border-mute"
+              />
+              <button
+                onClick={() => {
+                  save.mutate({ curseforge_key: key });
+                  setKey("");
+                }}
+                className="rounded bg-ink px-3 py-2 text-sm text-bg"
+              >
+                save
+              </button>
+            </div>
+            <p className="mt-1 text-xs text-mute">
+              kept on this machine and never sent back to the browser
+            </p>
+          </div>
+
+          <div>
+            <p className="text-xs text-mute">owner</p>
+            <p className="text-sm">{s.owner || "unclaimed"}</p>
+            {s.owner && (
+              <button
+                onClick={() => save.mutate({ owner: "" })}
+                className="mt-1 text-xs text-bad underline underline-offset-2"
+              >
+                release, the next login to open this claims it
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </main>
+  );
+}
+
+// An empty box means "go back to detection", which is why the placeholder shows
+// the detected value rather than the box being prefilled with it.
+function Field({
+  label,
+  value,
+  detected,
+  onSave,
+}: {
+  label: string;
+  value: string;
+  detected?: boolean;
+  onSave: (v: string) => void;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const shown = draft ?? (detected ? "" : value);
+  return (
+    <div>
+      <label className="mb-1 block text-xs text-mute">
+        {label} {detected && <span className="text-live">detected</span>}
+      </label>
+      <div className="flex gap-2">
+        <input
+          value={shown}
+          placeholder={value || "not found"}
+          onChange={(e) => setDraft(e.target.value)}
+          className="flex-1 rounded border border-edge bg-panel px-3 py-2 font-mono text-xs outline-none focus:border-mute"
+        />
+        <button
+          onClick={() => {
+            onSave(shown);
+            setDraft(null);
+          }}
+          className="rounded bg-panel px-3 py-2 text-sm text-mute"
+        >
+          save
+        </button>
+      </div>
+    </div>
   );
 }
 

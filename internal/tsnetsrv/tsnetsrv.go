@@ -5,9 +5,9 @@ package tsnetsrv
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
-	"path/filepath"
 	"strings"
 
 	"tailscale.com/tsnet"
@@ -17,11 +17,15 @@ type Server struct {
 	ts *tsnet.Server
 }
 
-func Start(ctx context.Context, nodeName, stateDir, authKey string) (*Server, error) {
+// Start brings the node up. Without an auth key tsnet prints a one-time login
+// URL to the log; after that the node key in dir is enough and it never asks
+// again.
+func Start(ctx context.Context, nodeName, dir, authKey string) (*Server, error) {
 	ts := &tsnet.Server{
 		Hostname: nodeName,
-		Dir:      filepath.Join(stateDir, "tsnet"),
+		Dir:      dir,
 		AuthKey:  authKey,
+		UserLogf: log.Printf,
 	}
 	if _, err := ts.Up(ctx); err != nil {
 		return nil, fmt.Errorf("tailscale up: %w", err)

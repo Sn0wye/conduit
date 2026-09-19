@@ -1,10 +1,11 @@
 # Conduit — Design
 
-Minecraft server fleet manager. One Go binary per machine, embedded PWA, Tailscale-only,
+Minecraft server manager for one machine. One Go binary, embedded PWA, Tailscale-only,
 pm2 process backend, CurseForge modpack install/update.
 
-Single operator (me). Under 5 machines. No control plane. **Dead simple — no abstractions
-until a second implementation actually exists.**
+Single operator (me). No control plane, no fleet, no machine list. A second machine is a
+second copy of the binary at its own URL. **Dead simple, no abstractions until a second
+implementation actually exists.**
 
 Stack: **Go** server-side. **Bun + Vite + React + TS + Tailwind** for the PWA. Nothing else.
 
@@ -18,7 +19,7 @@ Stack: **Go** server-side. **Bun + Vite + React + TS + Tailwind** for the PWA. N
 - `ecosystem.config.js` lists all 9 with `interpreter: /bin/sh`, `autorestart: true`
 - JDK 11 / 17 / 21 installed; each pack pins its own java path in `run.sh`
 - pm2 6.0.13 lives at `/home/ubuntu/n/bin/pm2`, installed through `n`. It is not on the
-  default non-login PATH, so the agent reads its location from config
+  default non-login PATH, so the agent finds it by asking a login shell
 - all 9 share `server-port=25565` and `rcon.port=25575`, so exactly one runs at a time
 - RCON is off everywhere and every `rcon.password` is blank. Left that way for now
 
@@ -28,18 +29,40 @@ Design follows this. Conduit does not restructure anything.
 
 ```
 browser (PWA)  ──HTTPS over tailnet──>  conduitd@snowye ──> pm2 ──> ./run.sh ──> java
-                                   └──> conduitd@<next box>
 ```
 
-Every agent is identical and independent. PWA is served by whichever agent you open, then
-talks directly to the others. Machine list lives in PWA localStorage — typed in by hand.
-No discovery, no registry, no shared state.
+The agent joins the tailnet as `conduit-<hostname>` and serves the PWA and the API on
+that one origin. The browser never talks to a second agent, so there is no machine
+switcher, no peer discovery and no CORS. Another box runs its own copy at its own
+hostname, and you install that one as a separate PWA.
+
+Cost of dropping the switcher: the CurseForge key is pasted once per machine, and a pack
+is downloaded once per machine. With one VPS neither is worth a control plane.
 
 ## Auth
 
 Tailnet ACL is the boundary. Agent binds to the tsnet interface only, never `0.0.0.0`.
-`tsnet.LocalClient().WhoIs()` per request, allowlist one login. No passwords, no sessions,
-no login screen.
+`tsnet.LocalClient().WhoIs()` per request. On top of that, trust on first use: the first
+login to call the machine is written to `settings.owner` and everyone else gets 403.
+`conduitd --claim you@example.com` resets it. No passwords, no sessions, no login screen.
+
+## No config file
+
+Nothing is configured on the machine. Paths are detected at startup and the settings
+screen overrides them into SQLite when a guess is wrong.
+
+- **pm2**: `bash -lc 'command -v pm2'` first, which is the only way to see what `n`, nvm,
+  fnm or volta put on the login PATH. Then known install globs, then plain `PATH`.
+- **node bin dir**: the directory holding pm2.
+- **servers root**: first of `~/mine_servers`, `~/servers`, `~/minecraft` that exists.
+- **node name**: `conduit-<hostname>`.
+- **CurseForge key**: pasted into the settings screen, stored server-side, never sent
+  back to the browser.
+
+Clearing an override in the UI hands the field back to detection.
+
+`~/.conduit/` holds `conduit.db`, the tsnet node key, job logs and downloaded packs.
+First run with no `--authkey` prints a login URL once; the node key persists after that.
 
 ## HTTPS is mandatory
 
@@ -52,8 +75,8 @@ Enable **MagicDNS** and **HTTPS Certificates** in the tailnet admin; agent uses
 SQLite at `~/.conduit/conduit.db`, using `modernc.org/sqlite` so the build stays
 `CGO_ENABLED=0` and cross-compiles from a Mac with one command.
 
-Three tables. `instances` holds settings. `jobs` holds one row per long operation.
-`job_logs` holds their output lines.
+Four tables. `instances` holds per-server settings. `settings` is a key/value table that
+replaces the config file. `jobs` holds one row per long operation, `job_logs` their output.
 
 Settings are stored. Status is not. Whether a server is running comes from `pm2 jlist`
 every time, and player count comes from RCON. Two sources of truth for the same fact is
@@ -137,7 +160,7 @@ Keep the last 2 rollback archives per instance.
 
 ## CurseForge
 
-API key in agent config, server-side only. PWA calls the agent's `/v1/cf/*` proxy.
+API key in the `settings` table, server-side only. PWA calls the agent's `/v1/cf/*` proxy.
 
 `api.curseforge.com`, `x-api-key` header:
 - `GET /v1/mods/search?gameId=432&classId=4471` (4471 = modpacks)
@@ -210,7 +233,8 @@ conduit/
   internal/
     api/          handlers, WS, whois middleware
     tsnetsrv/     tsnet + TLS
-    state/        state.json load/save
+    settings/     path detection + stored overrides
+    store/        sqlite: instances and settings
     pm2/          jlist, start, stop, logs
     rcon/
     curseforge/   client + pack resolution
@@ -233,7 +257,7 @@ build:
 ```
 
 Target is `linux/arm64` (Oracle Ampere). PWA embedded via `go:embed web/dist`.
-Deploy: scp the binary, `conduitd --authkey tskey-…`, systemd unit.
+Deploy: scp the binary, run it, click the login URL once, systemd unit.
 
 ## Frontend
 
@@ -242,9 +266,10 @@ no `tailwind.config.js`. TanStack Query for REST, raw WebSocket for console and 
 No component library. Console needs `@tanstack/react-virtual` — modpack servers emit
 thousands of log lines.
 
-Screens: machine switcher → instance list → instance detail (console, properties,
-backups, update). Four screens total.
+Screens: instance list → instance detail (console, properties, backups, update), plus
+settings. Three screens total. Every call is same origin.
 
 ## Deferred
 
-Docker backend, control plane, web push, Modrinth, scheduled restarts, multi-user.
+Docker backend, control plane, peer discovery, web push, Modrinth, scheduled restarts,
+multi-user.
