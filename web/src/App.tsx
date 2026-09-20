@@ -9,7 +9,7 @@ export default function App() {
   const info = useQuery({ queryKey: ["info"], queryFn: api.info });
 
   return (
-    <div className="mx-auto flex h-full max-w-3xl flex-col">
+    <div className="mx-auto flex h-full max-w-3xl flex-col overflow-hidden">
       <header className="flex items-center gap-3 border-b border-edge px-4 py-3">
         <button onClick={() => setScreen({ view: "list" })} className="text-sm">
           {info.data?.hostname ?? "conduit"}
@@ -140,7 +140,7 @@ function Detail({ name, onBack }: { name: string; onBack: () => void }) {
   const disk = stats.data?.disk;
 
   return (
-    <main className="flex flex-1 flex-col overflow-hidden">
+    <main className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <div className="flex items-center gap-3 border-b border-edge px-4 py-3">
         <button onClick={onBack} className="text-sm text-mute hover:text-ink">
           back
@@ -200,11 +200,13 @@ function Detail({ name, onBack }: { name: string; onBack: () => void }) {
         )}
       </div>
 
-      {tab === "console" ? (
-        <Console name={name} inst={inst} online={online} />
-      ) : (
-        <Backups name={name} online={online} rconReady={!!inst?.rcon_ready} />
-      )}
+      <div className="flex min-h-0 flex-1 flex-col">
+        {tab === "console" ? (
+          <Console name={name} inst={inst} online={online} />
+        ) : (
+          <Backups name={name} online={online} rconReady={!!inst?.rcon_ready} />
+        )}
+      </div>
     </main>
   );
 }
@@ -290,7 +292,7 @@ function Console({
       <pre
         ref={pane}
         onScroll={onScroll}
-        className="mx-4 mt-3 flex-1 overflow-auto rounded border border-edge bg-panel p-3 text-[11px] leading-relaxed text-mute"
+        className="mx-4 mt-3 min-h-0 flex-1 overflow-auto rounded border border-edge bg-panel p-3 text-[11px] leading-relaxed text-mute"
       >
         {body}
       </pre>
@@ -372,7 +374,7 @@ function Backups({
   const [confirming, setConfirming] = useState<string | null>(null);
 
   return (
-    <div className="flex-1 overflow-y-auto p-4">
+    <div className="min-h-0 flex-1 overflow-y-auto p-4">
       <div className="mb-3 flex items-center gap-3">
         <button
           onClick={() => create.mutate()}
