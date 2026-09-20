@@ -6,6 +6,7 @@ package backups
 import (
 	"archive/zip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -40,8 +41,73 @@ type manifest struct {
 	} `json:"backups"`
 }
 
+// rollbackPrefix marks a world directory that Conduit moved aside before
+// replacing it. The prefix is the flag: anything carrying it is a pre-restore
+// copy made by Conduit, never a backup the server's mod produced.
+const rollbackPrefix = "world.before-restore-"
+
+// Rollback is a world directory saved just before a restore overwrote it.
+// It is not a backup: no mod made it, it is a plain directory, and undoing is
+// a rename rather than an unzip.
+type Rollback struct {
+	Dir         string    `json:"dir"`
+	Kind        string    `json:"kind"` // always "pre_restore"
+	Created     time.Time `json:"created"`
+	SizeBytes   int64     `json:"size_bytes"`
+	ReplacedBy  string    `json:"replaced_by"` // the backup that was restored over it
+	InstanceDir string    `json:"-"`
+}
+
+// marker records what replaced a world, so the undo list can say "this is the
+// world that ATM10 1.2.1 overwrote" instead of just showing a timestamp.
+type marker struct {
+	Kind       string    `json:"kind"`
+	Created    time.Time `json:"created"`
+	ReplacedBy string    `json:"replaced_by"`
+	// World is the directory name this copy was taken from. Restoring puts it
+	// back under this name, which is "world" for every pack seen so far but is
+	// not guaranteed by anything.
+	World string `json:"world"`
+}
+
+func markerPath(worldDir string) string { return worldDir + ".conduit.json" }
+
+// nextRollbackDir picks a free name. The timestamp is only second-resolution,
+// so undoing twice in the same second would otherwise try to rename onto an
+// existing directory and fail.
+func nextRollbackDir(instanceDir string) string {
+	base := filepath.Join(instanceDir, rollbackPrefix+time.Now().Format("20060102-150405"))
+	candidate := base
+	for i := 2; ; i++ {
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			return candidate
+		}
+		candidate = fmt.Sprintf("%s-%d", base, i)
+	}
+}
+
+func writeMarker(worldDir, replacedBy, world string) {
+	b, err := json.Marshal(marker{Kind: "pre_restore", Created: time.Now(),
+		ReplacedBy: replacedBy, World: world})
+	if err == nil {
+		os.WriteFile(markerPath(worldDir), b, 0o644)
+	}
+}
+
+func readMarker(worldDir string) marker {
+	var m marker
+	if b, err := os.ReadFile(markerPath(worldDir)); err == nil {
+		json.Unmarshal(b, &m)
+	}
+	return m
+}
+
 // Dir is the backups directory of an instance.
 func Dir(instanceDir string) string { return filepath.Join(instanceDir, "backups") }
+
+// ErrBadName means the caller asked for something that is not ours to touch.
+// It is a bad request, not a server fault, and the API maps it to 400.
+var ErrBadName = errors.New("not a name this instance owns")
 
 // List prefers backups.json, which carries the size, checksum and map preview
 // the mod recorded. Any zip missing from it is still listed, so a file copied
@@ -107,7 +173,7 @@ func List(instanceDir string) ([]Backup, error) {
 // backups directory, since the name arrives from an HTTP path.
 func Find(instanceDir, file string) (Backup, error) {
 	if file != filepath.Base(file) || file == "" {
-		return Backup{}, fmt.Errorf("bad backup name %q", file)
+		return Backup{}, fmt.Errorf("bad backup name %q: %w", file, ErrBadName)
 	}
 	list, err := List(instanceDir)
 	if err != nil {
@@ -119,6 +185,98 @@ func Find(instanceDir, file string) (Backup, error) {
 		}
 	}
 	return Backup{}, fmt.Errorf("backup %q not found", file)
+}
+
+// ListRollbacks returns the worlds moved aside by earlier restores, newest
+// first. Nothing prunes these, which is deliberate: they are the undo.
+func ListRollbacks(instanceDir string, size func(string) int64) ([]Rollback, error) {
+	entries, err := os.ReadDir(instanceDir)
+	if err != nil {
+		return nil, err
+	}
+	out := []Rollback{}
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), rollbackPrefix) {
+			continue
+		}
+		full := filepath.Join(instanceDir, e.Name())
+		m := readMarker(full)
+		r := Rollback{Dir: e.Name(), Kind: "pre_restore", Created: m.Created,
+			ReplacedBy: m.ReplacedBy, InstanceDir: instanceDir}
+		if r.Created.IsZero() {
+			if info, err := e.Info(); err == nil {
+				r.Created = info.ModTime()
+			}
+		}
+		if size != nil {
+			r.SizeBytes = size(full)
+		}
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Created.After(out[j].Created) })
+	return out, nil
+}
+
+// checkRollbackName rejects anything that is not one of our own moved-aside
+// directories, since the name arrives from an HTTP path.
+func checkRollbackName(dir string) error {
+	if dir != filepath.Base(dir) || !strings.HasPrefix(dir, rollbackPrefix) {
+		return fmt.Errorf("%q is not a rollback directory: %w", dir, ErrBadName)
+	}
+	return nil
+}
+
+// Undo puts a moved-aside world back. The world currently in place is moved
+// aside in turn rather than deleted, so an undo of an undo is possible and
+// nothing is ever destroyed by this call.
+func Undo(instanceDir, dir string) (movedTo string, err error) {
+	if err := checkRollbackName(dir); err != nil {
+		return "", err
+	}
+	saved := filepath.Join(instanceDir, dir)
+	if fi, err := os.Stat(saved); err != nil || !fi.IsDir() {
+		return "", fmt.Errorf("rollback %q not found", dir)
+	}
+
+	m := readMarker(saved)
+	world := m.World
+	if world == "" {
+		world = "world"
+	}
+	live := filepath.Join(instanceDir, world)
+	if _, err := os.Stat(live); err == nil {
+		movedTo = nextRollbackDir(instanceDir)
+		if err := os.Rename(live, movedTo); err != nil {
+			return "", fmt.Errorf("move the current world aside: %w", err)
+		}
+		writeMarker(movedTo, "undo of "+dir, world)
+	}
+	if err := os.Rename(saved, live); err != nil {
+		if movedTo != "" {
+			os.Rename(movedTo, live)
+			os.Remove(markerPath(movedTo))
+		}
+		return "", err
+	}
+	os.Remove(markerPath(saved))
+	return movedTo, nil
+}
+
+// DeleteRollback removes a moved-aside world for good. This is the only call
+// in the package that destroys anything.
+func DeleteRollback(instanceDir, dir string) error {
+	if err := checkRollbackName(dir); err != nil {
+		return err
+	}
+	target := filepath.Join(instanceDir, dir)
+	if fi, err := os.Stat(target); err != nil || !fi.IsDir() {
+		return fmt.Errorf("rollback %q not found", dir)
+	}
+	if err := os.RemoveAll(target); err != nil {
+		return err
+	}
+	os.Remove(markerPath(target))
+	return nil
 }
 
 // Restore swaps the world for the one inside a backup zip. The caller must
@@ -153,10 +311,11 @@ func Restore(instanceDir, file string) (movedTo string, err error) {
 
 	live := filepath.Join(instanceDir, root)
 	if _, err := os.Stat(live); err == nil {
-		movedTo = live + ".before-restore-" + time.Now().Format("20060102-150405")
+		movedTo = nextRollbackDir(instanceDir)
 		if err := os.Rename(live, movedTo); err != nil {
 			return "", fmt.Errorf("move the current world aside: %w", err)
 		}
+		writeMarker(movedTo, b.File, root)
 	}
 
 	if err := unzip(zr, instanceDir); err != nil {
@@ -164,6 +323,7 @@ func Restore(instanceDir, file string) (movedTo string, err error) {
 		if movedTo != "" {
 			os.RemoveAll(live)
 			os.Rename(movedTo, live)
+			os.Remove(markerPath(movedTo))
 		}
 		return "", err
 	}

@@ -196,8 +196,13 @@ func (s *Server) listBackups(w http.ResponseWriter, r *http.Request) error {
 // zip the world itself: the mod flushes and pauses saving first, and a zip
 // taken behind its back is a torn world.
 func (s *Server) createBackup(w http.ResponseWriter, r *http.Request) error {
+	name := r.PathValue("name")
+	return s.busyWork(w, name, "backing up", func() error { return s.createBackupLocked(w, r, name) })
+}
+
+func (s *Server) createBackupLocked(w http.ResponseWriter, r *http.Request, name string) error {
 	ctx := r.Context()
-	inst, err := s.db.GetInstance(ctx, r.PathValue("name"))
+	inst, err := s.db.GetInstance(ctx, name)
 	if err != nil {
 		return err
 	}
@@ -231,8 +236,12 @@ func (s *Server) createBackup(w http.ResponseWriter, r *http.Request) error {
 // restoreBackup stops the server, swaps the world and starts it again if it was
 // running. The old world is moved aside, never deleted.
 func (s *Server) restoreBackup(w http.ResponseWriter, r *http.Request) error {
-	ctx := r.Context()
 	name := r.PathValue("name")
+	return s.busyWork(w, name, "rolling back", func() error { return s.restoreLocked(w, r, name) })
+}
+
+func (s *Server) restoreLocked(w http.ResponseWriter, r *http.Request, name string) error {
+	ctx := r.Context()
 	file := r.PathValue("file")
 	inst, err := s.db.GetInstance(ctx, name)
 	if err != nil {
@@ -283,4 +292,86 @@ func (s *Server) WarmDisk(ctx context.Context) {
 	for _, i := range insts {
 		go usage.Of(i.Dir)
 	}
+}
+
+// --- rollbacks ---
+//
+// A rollback is the world Conduit moved aside before a restore overwrote it.
+// It is kept apart from the backup list on purpose: the mod made those, Conduit
+// made these, and only these can be undone with a rename.
+
+func (s *Server) listRollbacks(w http.ResponseWriter, r *http.Request) error {
+	inst, err := s.db.GetInstance(r.Context(), r.PathValue("name"))
+	if err != nil {
+		return err
+	}
+	list, err := backups.ListRollbacks(inst.Dir, usage.DirBytes)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeJSON(w, 200, []backups.Rollback{})
+			return nil
+		}
+		return err
+	}
+	writeJSON(w, 200, list)
+	return nil
+}
+
+// undoRollback puts a saved world back. The world in place now is moved aside
+// in turn, so this call never destroys anything and can itself be undone.
+func (s *Server) undoRollback(w http.ResponseWriter, r *http.Request) error {
+	name := r.PathValue("name")
+	return s.busyWork(w, name, "undoing a rollback", func() error {
+		ctx := r.Context()
+		dir := r.PathValue("dir")
+		inst, err := s.db.GetInstance(ctx, name)
+		if err != nil {
+			return err
+		}
+		apps, err := s.client().List(ctx)
+		if err != nil {
+			return err
+		}
+		wasOnline := false
+		if a, ok := apps[name]; ok && a.Status == "online" {
+			wasOnline = true
+			if err := s.stopApp(ctx, name); err != nil {
+				return fmt.Errorf("stop before undoing: %w", err)
+			}
+		}
+		movedTo, err := backups.Undo(inst.Dir, dir)
+		if err != nil {
+			return err
+		}
+		started := false
+		if wasOnline {
+			if err := s.client().Delete(ctx, name); err != nil {
+				return err
+			}
+			if err := s.client().Start(ctx, name, inst.Dir, inst.Script); err != nil {
+				return fmt.Errorf("world put back, but starting again failed: %w", err)
+			}
+			started = true
+		}
+		writeJSON(w, 200, map[string]any{
+			"name": name, "undone": dir,
+			"previous_world": filepath.Base(movedTo), "restarted": started,
+		})
+		return nil
+	})
+}
+
+func (s *Server) deleteRollback(w http.ResponseWriter, r *http.Request) error {
+	name := r.PathValue("name")
+	return s.busyWork(w, name, "deleting a rollback", func() error {
+		inst, err := s.db.GetInstance(r.Context(), name)
+		if err != nil {
+			return err
+		}
+		if err := backups.DeleteRollback(inst.Dir, r.PathValue("dir")); err != nil {
+			return err
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return nil
+	})
 }

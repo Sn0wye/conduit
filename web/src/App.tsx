@@ -1,6 +1,15 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, bytes, uptime, type Backup, type Instance, type SettingsPatch } from "./api";
+import {
+  api,
+  bytes,
+  since,
+  uptime,
+  type Backup,
+  type Instance,
+  type Rollback,
+  type SettingsPatch,
+} from "./api";
 
 type Screen = { view: "list" } | { view: "detail"; name: string } | { view: "settings" };
 
@@ -355,30 +364,46 @@ function Backups({
   rconReady: boolean;
 }) {
   const qc = useQueryClient();
-  const list = useQuery({
-    queryKey: ["backups", name],
-    queryFn: () => api.backups(name),
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["backups", name] });
+    qc.invalidateQueries({ queryKey: ["rollbacks", name] });
+    qc.invalidateQueries({ queryKey: ["instances"] });
+  };
+
+  const list = useQuery({ queryKey: ["backups", name], queryFn: () => api.backups(name) });
+  const rollbacks = useQuery({
+    queryKey: ["rollbacks", name],
+    queryFn: () => api.rollbacks(name),
   });
+
   const create = useMutation({
     mutationFn: () => api.createBackup(name),
     // The mod zips in the background, so the file appears a moment later.
-    onSuccess: () => setTimeout(() => qc.invalidateQueries({ queryKey: ["backups", name] }), 8000),
+    onSuccess: () => setTimeout(refresh, 8000),
   });
-  const restore = useMutation({
+  const rollback = useMutation({
     mutationFn: (file: string) => api.restoreBackup(name, file),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["instances"] });
-      qc.invalidateQueries({ queryKey: ["backups", name] });
-    },
+    onSuccess: refresh,
   });
-  const [confirming, setConfirming] = useState<string | null>(null);
+  const undo = useMutation({
+    mutationFn: (dir: string) => api.undoRollback(name, dir),
+    onSuccess: refresh,
+  });
+  const drop = useMutation({
+    mutationFn: (dir: string) => api.deleteRollback(name, dir),
+    onSuccess: refresh,
+  });
+
+  const [confirming, setConfirming] = useState<Backup | null>(null);
+  const [dropping, setDropping] = useState<string | null>(null);
+  const working = rollback.isPending || undo.isPending;
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-4">
-      <div className="mb-3 flex items-center gap-3">
+      <div className="mb-4 flex items-center gap-3">
         <button
           onClick={() => create.mutate()}
-          disabled={!online || !rconReady || create.isPending}
+          disabled={!online || !rconReady || create.isPending || working}
           className="rounded bg-panel px-3 py-1.5 text-sm text-ink disabled:opacity-30"
         >
           back up now
@@ -395,82 +420,205 @@ function Backups({
       </div>
 
       {create.error && <Problem error={create.error} />}
-      {restore.error && <Problem error={restore.error} />}
-      {restore.data && (
+      {rollback.error && <Problem error={rollback.error} />}
+      {undo.error && <Problem error={undo.error} />}
+      {drop.error && <Problem error={drop.error} />}
+      {working && (
+        <p className="mb-3 rounded border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">
+          working. this stops the server, swaps the world and starts it again, so it takes a few
+          minutes. do not reload.
+        </p>
+      )}
+      {rollback.data && (
         <p className="mb-3 rounded border border-edge bg-panel px-3 py-2 text-xs text-mute">
-          restored. the old world is kept at {restore.data.previous_world}
-          {restore.data.restarted && ", server started again"}
+          rolled back. the world you had is kept as {rollback.data.previous_world}
+          {rollback.data.restarted && ", server started again"}
+        </p>
+      )}
+      {undo.data && (
+        <p className="mb-3 rounded border border-edge bg-panel px-3 py-2 text-xs text-mute">
+          put back. the world you had is kept as {undo.data.previous_world}
+          {undo.data.restarted && ", server started again"}
         </p>
       )}
 
+      {rollbacks.data && rollbacks.data.length > 0 && (
+        <section className="mb-6">
+          <h2 className="mb-2 text-xs text-warn">
+            worlds saved before a rollback · {rollbacks.data.length}
+          </h2>
+          <ul className="space-y-2">
+            {rollbacks.data.map((r) => (
+              <RollbackRow
+                key={r.dir}
+                r={r}
+                busy={working || drop.isPending}
+                confirmingDelete={dropping === r.dir}
+                onUndo={() => undo.mutate(r.dir)}
+                onAskDelete={() => setDropping(r.dir)}
+                onCancelDelete={() => setDropping(null)}
+                onDelete={() => {
+                  setDropping(null);
+                  drop.mutate(r.dir);
+                }}
+              />
+            ))}
+          </ul>
+          <p className="mt-2 text-[11px] text-faint">
+            kept until you delete them. nothing removes these on its own.
+          </p>
+        </section>
+      )}
+
+      <h2 className="mb-2 text-xs text-mute">backups the server made</h2>
       <ul className="space-y-2">
         {list.data?.map((b) => (
           <BackupRow
             key={b.file}
             b={b}
-            confirming={confirming === b.file}
-            pending={restore.isPending}
-            onAsk={() => setConfirming(b.file)}
-            onCancel={() => setConfirming(null)}
-            onGo={() => {
-              setConfirming(null);
-              restore.mutate(b.file);
-            }}
+            busy={working}
+            onAsk={() => setConfirming(b)}
           />
         ))}
       </ul>
       {list.data?.length === 0 && <p className="text-xs text-mute">no backups on disk</p>}
+
+      {confirming && (
+        <ConfirmRollback
+          b={confirming}
+          onCancel={() => setConfirming(null)}
+          onGo={() => {
+            const file = confirming.file;
+            setConfirming(null);
+            rollback.mutate(file);
+          }}
+        />
+      )}
     </div>
   );
 }
 
-function BackupRow({
+// ConfirmRollback sits at the bottom of the screen rather than where the
+// button was, so the second tap never lands on the spot the first one just
+// left. It names what goes, not what the button does.
+function ConfirmRollback({
   b,
-  confirming,
-  pending,
-  onAsk,
   onCancel,
   onGo,
 }: {
   b: Backup;
-  confirming: boolean;
-  pending: boolean;
-  onAsk: () => void;
   onCancel: () => void;
   onGo: () => void;
 }) {
   return (
-    <li className="flex items-center gap-3 rounded border border-edge bg-panel p-2">
-      {/* FTB Backups 2 stores a map thumbnail in backups.json. */}
-      {b.preview ? (
-        <img src={b.preview} alt="" className="size-10 shrink-0 rounded object-cover" />
-      ) : (
-        <span className="size-10 shrink-0 rounded bg-edge" />
-      )}
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-xs">{new Date(b.created).toLocaleString()}</div>
-        <div className="text-[11px] text-faint">
-          {bytes(b.size)} {b.world && `· ${b.world}`}
+    <div className="fixed inset-x-0 bottom-0 z-10 border-t border-edge bg-panel p-4">
+      <div className="mx-auto max-w-3xl">
+        <p className="text-sm">Roll back to {new Date(b.created).toLocaleString()}?</p>
+        <p className="mt-1 text-xs text-mute">
+          {since(b.created)} of play since then is gone: blocks, inventories, quests, everything.
+          The world you have now is kept as a copy you can put back.
+        </p>
+        <div className="mt-3 flex gap-2">
+          <button onClick={onCancel} className="rounded bg-panel px-3 py-2 text-sm text-mute">
+            cancel
+          </button>
+          <button onClick={onGo} className="rounded bg-bad/20 px-3 py-2 text-sm text-bad">
+            roll back
+          </button>
         </div>
       </div>
-      {confirming ? (
-        <div className="flex shrink-0 gap-2">
-          <button onClick={onGo} className="rounded bg-bad/20 px-2 py-1 text-xs text-bad">
-            replace world
+    </div>
+  );
+}
+
+function RollbackRow({
+  r,
+  busy,
+  confirmingDelete,
+  onUndo,
+  onAskDelete,
+  onCancelDelete,
+  onDelete,
+}: {
+  r: Rollback;
+  busy: boolean;
+  confirmingDelete: boolean;
+  onUndo: () => void;
+  onAskDelete: () => void;
+  onCancelDelete: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <li className="rounded border border-warn/30 bg-panel p-2">
+      <div className="flex items-center gap-3">
+        <span className="shrink-0 rounded bg-warn/15 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-warn">
+          pre-rollback
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-xs">{new Date(r.created).toLocaleString()}</div>
+          <div className="truncate text-[11px] text-faint">
+            {bytes(r.size_bytes)}
+            {r.replaced_by && ` · replaced by ${r.replaced_by}`}
+          </div>
+        </div>
+        {!confirmingDelete && (
+          <div className="flex shrink-0 gap-3">
+            <button
+              onClick={onUndo}
+              disabled={busy}
+              className="text-xs text-ink underline underline-offset-2 disabled:opacity-30"
+            >
+              put back
+            </button>
+            <button
+              onClick={onAskDelete}
+              disabled={busy}
+              className="text-xs text-faint hover:text-bad disabled:opacity-30"
+            >
+              delete
+            </button>
+          </div>
+        )}
+      </div>
+      {confirmingDelete && (
+        <div className="mt-2 flex items-center gap-2 border-t border-edge pt-2">
+          <span className="flex-1 text-[11px] text-bad">
+            delete this world for good? it is the only copy.
+          </span>
+          <button onClick={onDelete} className="rounded bg-bad/20 px-2 py-1 text-xs text-bad">
+            delete
           </button>
-          <button onClick={onCancel} className="px-2 py-1 text-xs text-mute">
+          <button onClick={onCancelDelete} className="px-2 py-1 text-xs text-mute">
             cancel
           </button>
         </div>
-      ) : (
-        <button
-          onClick={onAsk}
-          disabled={pending}
-          className="shrink-0 text-xs text-mute underline underline-offset-2 hover:text-ink disabled:opacity-30"
-        >
-          restore
-        </button>
       )}
+    </li>
+  );
+}
+
+function BackupRow({ b, busy, onAsk }: { b: Backup; busy: boolean; onAsk: () => void }) {
+  return (
+    <li className="flex items-center gap-3 rounded border border-edge bg-panel p-2">
+      {/* FTB Backups 2 stores a map thumbnail in backups.json. */}
+      {b.preview ? (
+        <img src={b.preview} alt="" className="size-12 shrink-0 rounded object-cover" />
+      ) : (
+        <span className="size-12 shrink-0 rounded bg-edge" />
+      )}
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-xs">{since(b.created)} ago</div>
+        <div className="truncate text-[11px] text-faint">
+          {new Date(b.created).toLocaleString()} · {bytes(b.size)}
+        </div>
+      </div>
+      <button
+        onClick={onAsk}
+        disabled={busy}
+        className="shrink-0 text-xs text-mute underline underline-offset-2 hover:text-ink disabled:opacity-30"
+      >
+        roll back
+      </button>
     </li>
   );
 }

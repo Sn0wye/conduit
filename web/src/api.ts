@@ -59,6 +59,16 @@ export type Backup = {
   from_manifest: boolean;
 };
 
+// A rollback is a world Conduit moved aside before a restore replaced it.
+// kind separates it from the zips the server's backup mod writes.
+export type Rollback = {
+  dir: string;
+  kind: "pre_restore";
+  created: string;
+  size_bytes: number;
+  replaced_by: string;
+};
+
 export type Settings = {
   pm2_bin: string;
   node_bin_dir: string;
@@ -124,6 +134,14 @@ export const api = {
       `/v1/instances/${name}/backups/${encodeURIComponent(file)}/restore`,
       { method: "POST" },
     ),
+  rollbacks: (name: string) => call<Rollback[]>(`/v1/instances/${name}/rollbacks`),
+  undoRollback: (name: string, dir: string) =>
+    call<{ previous_world: string; restarted: boolean }>(
+      `/v1/instances/${name}/rollbacks/${encodeURIComponent(dir)}/undo`,
+      { method: "POST" },
+    ),
+  deleteRollback: (name: string, dir: string) =>
+    call<void>(`/v1/instances/${name}/rollbacks/${encodeURIComponent(dir)}`, { method: "DELETE" }),
   settings: () => call<Settings>("/v1/settings"),
   saveSettings: (body: SettingsPatch) =>
     call<Settings>("/v1/settings", { method: "PATCH", body: JSON.stringify(body) }),
@@ -140,6 +158,19 @@ export function bytes(n: number): string {
   const i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), u.length - 1);
   const v = n / Math.pow(1024, i);
   return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)}${u[i]}`;
+}
+
+// since renders the gap a rollback would throw away, in the units a person
+// thinks in. "4 hours of play" stops a wrong tap; a timestamp does not.
+export function since(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 0) return "no time";
+  const m = Math.round(ms / 60000);
+  if (m < 60) return `${m} minute${m === 1 ? "" : "s"}`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h} hour${h === 1 ? "" : "s"}`;
+  const d = Math.round(h / 24);
+  return `${d} day${d === 1 ? "" : "s"}`;
 }
 
 export function uptime(ms: number): string {

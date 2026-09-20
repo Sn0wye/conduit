@@ -118,3 +118,32 @@ func within(path, dir string) bool {
 func hasDotDotPrefix(rel string) bool {
 	return len(rel) >= 3 && rel[0] == '.' && rel[1] == '.' && rel[2] == filepath.Separator
 }
+
+// DirBytes is the cached size of one directory. Rollback worlds run to
+// hundreds of megabytes across thousands of files, and the backups screen asks
+// for every one of them on each poll.
+func DirBytes(dir string) int64 {
+	key := "size:" + dir
+	mu.Lock()
+	e, ok := cache[key]
+	if ok && time.Since(e.d.MeasuredAt) < ttl {
+		mu.Unlock()
+		return e.d.InstanceBytes
+	}
+	mu.Unlock()
+
+	var total int64
+	filepath.WalkDir(dir, func(_ string, de fs.DirEntry, err error) error {
+		if err != nil || de.IsDir() {
+			return nil
+		}
+		if info, err := de.Info(); err == nil {
+			total += info.Size()
+		}
+		return nil
+	})
+	mu.Lock()
+	cache[key] = entry{d: Disk{InstanceBytes: total, MeasuredAt: time.Now()}}
+	mu.Unlock()
+	return total
+}

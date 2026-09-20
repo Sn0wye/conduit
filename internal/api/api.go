@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/snowye/conduit/internal/backups"
 	"github.com/snowye/conduit/internal/pm2"
 	"github.com/snowye/conduit/internal/settings"
 	"github.com/snowye/conduit/internal/store"
@@ -31,10 +32,52 @@ type Server struct {
 	mu  sync.RWMutex
 	set settings.Settings
 	pm  *pm2.Client
+
+	// busy holds the instances with a destructive operation in flight. A
+	// restore takes minutes with no progress to look at, so reloading and
+	// clicking again is the natural thing to do; without this, the second call
+	// would unzip into a directory the first one is still renaming.
+	busyMu sync.Mutex
+	busy   map[string]string
 }
 
 func New(db *store.DB, set settings.Settings) *Server {
-	return &Server{db: db, set: set, pm: pm2.New(set.PM2Bin, set.NodeBinDir)}
+	return &Server{db: db, set: set, pm: pm2.New(set.PM2Bin, set.NodeBinDir),
+		busy: map[string]string{}}
+}
+
+// errBusy is returned as 409 rather than queued. Waiting silently behind
+// another restore is worse than being told to come back.
+type errBusy struct{ name, what string }
+
+func (e errBusy) Error() string { return e.name + " is busy: " + e.what }
+
+// acquire claims an instance for one destructive operation.
+func (s *Server) acquire(name, what string) error {
+	s.busyMu.Lock()
+	defer s.busyMu.Unlock()
+	if cur, ok := s.busy[name]; ok {
+		return errBusy{name, cur}
+	}
+	s.busy[name] = what
+	return nil
+}
+
+func (s *Server) release(name string) {
+	s.busyMu.Lock()
+	defer s.busyMu.Unlock()
+	delete(s.busy, name)
+}
+
+// busyWork runs fn with the instance claimed, or answers 409 if something else
+// already holds it.
+func (s *Server) busyWork(w http.ResponseWriter, name, what string, fn func() error) error {
+	if err := s.acquire(name, what); err != nil {
+		fail(w, http.StatusConflict, "busy", err)
+		return nil
+	}
+	defer s.release(name)
+	return fn()
 }
 
 func (s *Server) client() *pm2.Client {
@@ -71,6 +114,8 @@ func handle(fn func(http.ResponseWriter, *http.Request) error) http.HandlerFunc 
 			switch {
 			case errors.Is(err, store.ErrNotFound):
 				fail(w, http.StatusNotFound, "not_found", err)
+			case errors.Is(err, backups.ErrBadName):
+				fail(w, http.StatusBadRequest, "bad_request", err)
 			default:
 				fail(w, http.StatusInternalServerError, "internal", err)
 			}
@@ -94,6 +139,9 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/instances/{name}/console", handle(s.console))
 	mux.HandleFunc("POST /v1/instances/{name}/rcon", handle(s.enableRCON))
 	mux.HandleFunc("GET /v1/instances/{name}/backups", handle(s.listBackups))
+	mux.HandleFunc("GET /v1/instances/{name}/rollbacks", handle(s.listRollbacks))
+	mux.HandleFunc("POST /v1/instances/{name}/rollbacks/{dir}/undo", handle(s.undoRollback))
+	mux.HandleFunc("DELETE /v1/instances/{name}/rollbacks/{dir}", handle(s.deleteRollback))
 	mux.HandleFunc("POST /v1/instances/{name}/backups", handle(s.createBackup))
 	mux.HandleFunc("POST /v1/instances/{name}/backups/{file}/restore", handle(s.restoreBackup))
 	mux.HandleFunc("GET /v1/settings", handle(s.getSettings))
@@ -287,8 +335,12 @@ func realpath(dir string) string {
 // port 25565, so exactly one can run. Conduit decides which, rather than
 // leaving it to whichever process binds the port first.
 func (s *Server) start(w http.ResponseWriter, r *http.Request) error {
-	ctx := r.Context()
 	name := r.PathValue("name")
+	return s.busyWork(w, name, "starting", func() error { return s.startLocked(w, r, name) })
+}
+
+func (s *Server) startLocked(w http.ResponseWriter, r *http.Request, name string) error {
+	ctx := r.Context()
 	inst, err := s.db.GetInstance(ctx, name)
 	if err != nil {
 		return err
@@ -336,19 +388,25 @@ func (s *Server) stopApp(ctx context.Context, name string) error {
 
 func (s *Server) stop(w http.ResponseWriter, r *http.Request) error {
 	name := r.PathValue("name")
-	if _, err := s.db.GetInstance(r.Context(), name); err != nil {
-		return err
-	}
-	if err := s.stopApp(r.Context(), name); err != nil {
-		return err
-	}
-	writeJSON(w, 200, map[string]any{"name": name, "stopped": true})
-	return nil
+	return s.busyWork(w, name, "stopping", func() error {
+		if _, err := s.db.GetInstance(r.Context(), name); err != nil {
+			return err
+		}
+		if err := s.stopApp(r.Context(), name); err != nil {
+			return err
+		}
+		writeJSON(w, 200, map[string]any{"name": name, "stopped": true})
+		return nil
+	})
 }
 
 func (s *Server) restart(w http.ResponseWriter, r *http.Request) error {
-	ctx := r.Context()
 	name := r.PathValue("name")
+	return s.busyWork(w, name, "restarting", func() error { return s.restartLocked(w, r, name) })
+}
+
+func (s *Server) restartLocked(w http.ResponseWriter, r *http.Request, name string) error {
+	ctx := r.Context()
 	inst, err := s.db.GetInstance(ctx, name)
 	if err != nil {
 		return err
