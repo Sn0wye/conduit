@@ -15,14 +15,18 @@ import (
 var ErrNotFound = errors.New("not found")
 
 type Instance struct {
-	Name      string    `json:"name"` // also the pm2 app name
-	Dir       string    `json:"dir"`
-	Script    string    `json:"script"` // ./run.sh for Forge and NeoForge packs
-	Port      int       `json:"port"`
-	RCONPort  int       `json:"rcon_port"`
-	RCONPass  string    `json:"-"` // never sent to the browser
-	RCONReady bool      `json:"rcon_ready"`
-	Backups   string    `json:"backups"` // glob for existing backup files
+	Name      string `json:"name"` // also the pm2 app name
+	Dir       string `json:"dir"`
+	Script    string `json:"script"` // ./run.sh for Forge and NeoForge packs
+	Port      int    `json:"port"`
+	RCONPort  int    `json:"rcon_port"`
+	RCONPass  string `json:"-"` // never sent to the browser
+	RCONReady bool   `json:"rcon_ready"`
+	Backups   string `json:"backups"` // glob for existing backup files
+	// BackupCmd is what Conduit sends over RCON to take a backup. The server
+	// mod owns the format, so this is its command, not ours. FTB Backups 2
+	// answers to "backup start".
+	BackupCmd string    `json:"backup_cmd"`
 	ProjectID int       `json:"project_id"`
 	FileID    int       `json:"file_id"`
 	Version   string    `json:"version"`
@@ -63,22 +67,65 @@ CREATE TABLE IF NOT EXISTS instances (
   rcon_pass  TEXT NOT NULL DEFAULT '',
   rcon_ready INTEGER NOT NULL DEFAULT 0,
   backups    TEXT NOT NULL DEFAULT '',
+  backup_cmd TEXT NOT NULL DEFAULT 'backup start',
   project_id INTEGER NOT NULL DEFAULT 0,
   file_id    INTEGER NOT NULL DEFAULT 0,
   version    TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL
 );`)
-	return err
+	if err != nil {
+		return err
+	}
+	return d.addColumns()
 }
 
-const cols = `name, dir, script, port, rcon_port, rcon_pass, rcon_ready, backups, project_id, file_id, version, created_at`
+// addColumns brings an existing database up to the schema above. CREATE TABLE
+// IF NOT EXISTS does nothing to a table that already exists, so a new column
+// needs its own ALTER or older databases keep failing every query.
+func (d *DB) addColumns() error {
+	rows, err := d.sql.Query(`PRAGMA table_info(instances)`)
+	if err != nil {
+		return err
+	}
+	have := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		have[name] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	added := []struct{ name, ddl string }{
+		{"backup_cmd", `ALTER TABLE instances ADD COLUMN backup_cmd TEXT NOT NULL DEFAULT 'backup start'`},
+	}
+	for _, c := range added {
+		if have[c.name] {
+			continue
+		}
+		if _, err := d.sql.Exec(c.ddl); err != nil {
+			return fmt.Errorf("add column %s: %w", c.name, err)
+		}
+	}
+	return nil
+}
+
+const cols = `name, dir, script, port, rcon_port, rcon_pass, rcon_ready, backups, backup_cmd, project_id, file_id, version, created_at`
 
 func scan(row interface{ Scan(...any) error }) (Instance, error) {
 	var i Instance
 	var created string
 	var ready int
 	err := row.Scan(&i.Name, &i.Dir, &i.Script, &i.Port, &i.RCONPort, &i.RCONPass,
-		&ready, &i.Backups, &i.ProjectID, &i.FileID, &i.Version, &created)
+		&ready, &i.Backups, &i.BackupCmd, &i.ProjectID, &i.FileID, &i.Version, &created)
 	if err != nil {
 		return i, err
 	}
@@ -120,19 +167,26 @@ func (d *DB) PutInstance(ctx context.Context, i Instance) error {
 	if i.Script == "" {
 		i.Script = "./run.sh"
 	}
+	if i.BackupCmd == "" {
+		i.BackupCmd = "backup start"
+	}
+	if i.RCONPort == 0 {
+		i.RCONPort = 25575
+	}
 	ready := 0
 	if i.RCONReady {
 		ready = 1
 	}
 	_, err := d.sql.ExecContext(ctx, `
-INSERT INTO instances (`+cols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+INSERT INTO instances (`+cols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(name) DO UPDATE SET
   dir=excluded.dir, script=excluded.script, port=excluded.port,
   rcon_port=excluded.rcon_port, rcon_pass=excluded.rcon_pass,
   rcon_ready=excluded.rcon_ready, backups=excluded.backups,
+  backup_cmd=excluded.backup_cmd,
   project_id=excluded.project_id, file_id=excluded.file_id, version=excluded.version`,
 		i.Name, i.Dir, i.Script, i.Port, i.RCONPort, i.RCONPass, ready,
-		i.Backups, i.ProjectID, i.FileID, i.Version, i.CreatedAt.Format(time.RFC3339))
+		i.Backups, i.BackupCmd, i.ProjectID, i.FileID, i.Version, i.CreatedAt.Format(time.RFC3339))
 	return err
 }
 

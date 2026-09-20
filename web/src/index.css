@@ -1,15 +1,18 @@
 @import "tailwindcss";
 
+/* Zinc, pushed darker than zinc-950 for the page itself so panels read as
+   raised without needing borders everywhere. No blue anywhere. */
 @theme {
-  --color-bg: #0b0f14;
-  --color-panel: #121821;
-  --color-edge: #1e2733;
-  --color-ink: #e6edf3;
-  --color-mute: #7d8b9a;
-  --color-live: #3fb950;
-  --color-dead: #4b5563;
-  --color-warn: #d29922;
-  --color-bad: #f85149;
+  --color-bg: #09090b;
+  --color-panel: #18181b;
+  --color-edge: #27272a;
+  --color-ink: #fafafa;
+  --color-mute: #a1a1aa;
+  --color-faint: #52525b;
+  --color-live: #4ade80;
+  --color-dead: #52525b;
+  --color-warn: #fbbf24;
+  --color-bad: #f87171;
 }
 
 html,

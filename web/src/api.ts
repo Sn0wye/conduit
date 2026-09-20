@@ -8,6 +8,7 @@ export type Instance = {
   script: string;
   port: number;
   rcon_ready: boolean;
+  backup_cmd: string;
   version: string;
   status: string;
   pid: number;
@@ -25,6 +26,37 @@ export type Info = {
   pm2: string;
   pm2_error?: string;
   user: string;
+};
+
+export type Disk = {
+  instance_bytes: number;
+  world_bytes: number;
+  backup_bytes: number;
+  free_bytes: number;
+  total_bytes: number;
+  measured_at: string;
+};
+
+export type Stats = {
+  name: string;
+  status: string;
+  pid?: number;
+  cpu_pct?: number;
+  memory_mb?: number;
+  uptime_ms?: number;
+  restarts?: number;
+  disk?: Disk;
+  players?: string;
+};
+
+export type Backup = {
+  file: string;
+  size: number;
+  created: string;
+  sha1?: string;
+  world?: string;
+  preview?: string;
+  from_manifest: boolean;
 };
 
 export type Settings = {
@@ -73,6 +105,25 @@ export const api = {
   start: (name: string) => call<unknown>(`/v1/instances/${name}/start`, { method: "POST" }),
   stop: (name: string) => call<unknown>(`/v1/instances/${name}/stop`, { method: "POST" }),
   restart: (name: string) => call<unknown>(`/v1/instances/${name}/restart`, { method: "POST" }),
+  stats: (name: string) => call<Stats>(`/v1/instances/${name}/stats`),
+  console: (name: string, command: string) =>
+    call<{ command: string; reply: string }>(`/v1/instances/${name}/console`, {
+      method: "POST",
+      body: JSON.stringify({ command }),
+    }),
+  enableRcon: (name: string) =>
+    call<{ restart_required: boolean; connected: boolean; already_enabled: boolean }>(
+      `/v1/instances/${name}/rcon`,
+      { method: "POST" },
+    ),
+  backups: (name: string) => call<Backup[]>(`/v1/instances/${name}/backups`),
+  createBackup: (name: string) =>
+    call<{ reply: string }>(`/v1/instances/${name}/backups`, { method: "POST" }),
+  restoreBackup: (name: string, file: string) =>
+    call<{ previous_world: string; restarted: boolean }>(
+      `/v1/instances/${name}/backups/${encodeURIComponent(file)}/restore`,
+      { method: "POST" },
+    ),
   settings: () => call<Settings>("/v1/settings"),
   saveSettings: (body: SettingsPatch) =>
     call<Settings>("/v1/settings", { method: "PATCH", body: JSON.stringify(body) }),
@@ -82,6 +133,14 @@ export const api = {
     return res.text();
   },
 };
+
+export function bytes(n: number): string {
+  if (!n) return "0";
+  const u = ["B", "K", "M", "G", "T"];
+  const i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), u.length - 1);
+  const v = n / Math.pow(1024, i);
+  return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)}${u[i]}`;
+}
 
 export function uptime(ms: number): string {
   if (!ms) return "";

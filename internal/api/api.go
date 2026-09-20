@@ -90,6 +90,12 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/instances/{name}/stop", handle(s.stop))
 	mux.HandleFunc("POST /v1/instances/{name}/restart", handle(s.restart))
 	mux.HandleFunc("GET /v1/instances/{name}/logs", handle(s.logs))
+	mux.HandleFunc("GET /v1/instances/{name}/stats", handle(s.stats))
+	mux.HandleFunc("POST /v1/instances/{name}/console", handle(s.console))
+	mux.HandleFunc("POST /v1/instances/{name}/rcon", handle(s.enableRCON))
+	mux.HandleFunc("GET /v1/instances/{name}/backups", handle(s.listBackups))
+	mux.HandleFunc("POST /v1/instances/{name}/backups", handle(s.createBackup))
+	mux.HandleFunc("POST /v1/instances/{name}/backups/{file}/restore", handle(s.restoreBackup))
 	mux.HandleFunc("GET /v1/settings", handle(s.getSettings))
 	mux.HandleFunc("PATCH /v1/settings", handle(s.patchSettings))
 	return mux
