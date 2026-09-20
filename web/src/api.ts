@@ -46,7 +46,11 @@ export type Stats = {
   uptime_ms?: number;
   restarts?: number;
   disk?: Disk;
-  players?: string;
+  // -1 when the server reworded its reply to "list" and the count could not
+  // be read. Names are whatever it listed, which may be empty.
+  players_online?: number;
+  players_max?: number;
+  players?: string[];
 };
 
 export type Backup = {

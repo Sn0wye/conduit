@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -53,11 +54,40 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) error {
 
 	if inst.RCONReady && out["status"] == "online" {
 		if reply, err := rcon.Once(rconAddr(inst), inst.RCONPass, "list"); err == nil {
-			out["players"] = strings.TrimSpace(reply)
+			online, max, names := parsePlayers(reply)
+			out["players_online"] = online
+			out["players_max"] = max
+			out["players"] = names
 		}
 	}
 	writeJSON(w, 200, out)
 	return nil
+}
+
+// playerCount pulls the numbers out of vanilla's reply to "list":
+//
+//	There are 2 of a max of 20 players online: Alice, Bob
+//
+// Mods reword this, so a miss returns -1 and the card shows a dash rather than
+// a wrong number.
+var playerCount = regexp.MustCompile(`There are (\d+) of a max of (\d+)`)
+
+func parsePlayers(reply string) (online, max int, names []string) {
+	online, max = -1, -1
+	reply = strings.TrimSpace(reply)
+	if m := playerCount.FindStringSubmatch(reply); m != nil {
+		online, _ = strconv.Atoi(m[1])
+		max, _ = strconv.Atoi(m[2])
+	}
+	names = []string{}
+	if _, after, found := strings.Cut(reply, ":"); found {
+		for _, n := range strings.Split(after, ",") {
+			if n = strings.TrimSpace(n); n != "" {
+				names = append(names, n)
+			}
+		}
+	}
+	return online, max, names
 }
 
 func rconAddr(i store.Instance) string {

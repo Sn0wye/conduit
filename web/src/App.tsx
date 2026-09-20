@@ -185,9 +185,6 @@ function Detail({ name, onBack }: { name: string; onBack: () => void }) {
         </button>
         <span className={`size-2 rounded-full ${dot(stats.data?.status ?? inst?.status ?? "stopped")}`} />
         <h1 className="flex-1 truncate text-sm">{name}</h1>
-        {stats.data?.players && (
-          <span className="truncate text-xs text-mute">{stats.data.players}</span>
-        )}
       </div>
 
       <div className="flex gap-2 px-4 py-3">
@@ -265,8 +262,13 @@ function Detail({ name, onBack }: { name: string; onBack: () => void }) {
 
 function Stats({ stats, online }: { stats?: import("./api").Stats; online: boolean }) {
   const d = stats?.disk;
+  const count = stats?.players_online ?? -1;
+  const players =
+    online && count >= 0 ? `${count}/${stats?.players_max ?? "?"}` : online ? "—" : "—";
+
   return (
-    <div className="grid grid-cols-4 gap-px border-y border-edge bg-edge text-center">
+    <div className="grid grid-cols-5 gap-px border-y border-edge bg-edge text-center">
+      <Cell label="players" value={players} title={stats?.players?.join(", ")} />
       <Cell label="cpu" value={online ? `${(stats?.cpu_pct ?? 0).toFixed(0)}%` : "—"} />
       <Cell
         label="memory"
@@ -278,9 +280,11 @@ function Stats({ stats, online }: { stats?: import("./api").Stats; online: boole
   );
 }
 
-function Cell({ label, value }: { label: string; value: string }) {
+// title carries the player names, so the card stays a number and hovering
+// still answers "who".
+function Cell({ label, value, title }: { label: string; value: string; title?: string }) {
   return (
-    <div className="bg-bg py-2">
+    <div className="bg-bg py-2" title={title || undefined}>
       <div className="text-sm tabular-nums">{value}</div>
       <div className="text-[10px] uppercase tracking-wide text-faint">{label}</div>
     </div>
