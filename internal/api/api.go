@@ -112,7 +112,7 @@ func handle(fn func(http.ResponseWriter, *http.Request) error) http.HandlerFunc 
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := fn(w, r); err != nil {
 			switch {
-			case errors.Is(err, store.ErrNotFound):
+			case errors.Is(err, store.ErrNotFound), errors.Is(err, backups.ErrNotFound):
 				fail(w, http.StatusNotFound, "not_found", err)
 			case errors.Is(err, backups.ErrBadName):
 				fail(w, http.StatusBadRequest, "bad_request", err)
@@ -139,6 +139,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("POST /v1/instances/{name}/console", handle(s.console))
 	mux.HandleFunc("POST /v1/instances/{name}/rcon", handle(s.enableRCON))
 	mux.HandleFunc("GET /v1/instances/{name}/backups", handle(s.listBackups))
+	mux.HandleFunc("DELETE /v1/instances/{name}/backups/{file}", handle(s.deleteBackup))
 	mux.HandleFunc("GET /v1/instances/{name}/rollbacks", handle(s.listRollbacks))
 	mux.HandleFunc("POST /v1/instances/{name}/rollbacks/{dir}/undo", handle(s.undoRollback))
 	mux.HandleFunc("DELETE /v1/instances/{name}/rollbacks/{dir}", handle(s.deleteRollback))

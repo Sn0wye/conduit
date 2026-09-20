@@ -109,6 +109,10 @@ func Dir(instanceDir string) string { return filepath.Join(instanceDir, "backups
 // It is a bad request, not a server fault, and the API maps it to 400.
 var ErrBadName = errors.New("not a name this instance owns")
 
+// ErrNotFound means the name was well formed but nothing is there, usually
+// because the mod pruned the file while the page was open.
+var ErrNotFound = errors.New("not found")
+
 // List prefers backups.json, which carries the size, checksum and map preview
 // the mod recorded. Any zip missing from it is still listed, so a file copied
 // in by hand is not invisible.
@@ -184,7 +188,7 @@ func Find(instanceDir, file string) (Backup, error) {
 			return b, nil
 		}
 	}
-	return Backup{}, fmt.Errorf("backup %q not found", file)
+	return Backup{}, fmt.Errorf("backup %q: %w", file, ErrNotFound)
 }
 
 // ListRollbacks returns the worlds moved aside by earlier restores, newest
@@ -235,7 +239,7 @@ func Undo(instanceDir, dir string) (movedTo string, err error) {
 	}
 	saved := filepath.Join(instanceDir, dir)
 	if fi, err := os.Stat(saved); err != nil || !fi.IsDir() {
-		return "", fmt.Errorf("rollback %q not found", dir)
+		return "", fmt.Errorf("rollback %q: %w", dir, ErrNotFound)
 	}
 
 	m := readMarker(saved)
@@ -270,13 +274,25 @@ func DeleteRollback(instanceDir, dir string) error {
 	}
 	target := filepath.Join(instanceDir, dir)
 	if fi, err := os.Stat(target); err != nil || !fi.IsDir() {
-		return fmt.Errorf("rollback %q not found", dir)
+		return fmt.Errorf("rollback %q: %w", dir, ErrNotFound)
 	}
 	if err := os.RemoveAll(target); err != nil {
 		return err
 	}
 	os.Remove(markerPath(target))
 	return nil
+}
+
+// Delete removes one backup zip. The mod's backups.json is left alone: it
+// rewrites that file on its own schedule, and editing it underneath a running
+// server risks losing whatever it was about to write. List already skips
+// manifest entries whose file is gone, so a stale entry is invisible.
+func Delete(instanceDir, file string) error {
+	b, err := Find(instanceDir, file)
+	if err != nil {
+		return err
+	}
+	return os.Remove(b.Path)
 }
 
 // Restore swaps the world for the one inside a backup zip. The caller must

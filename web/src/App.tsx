@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   api,
@@ -130,6 +130,35 @@ function Detail({ name, onBack }: { name: string; onBack: () => void }) {
 
   const [tab, setTab] = useState<"console" | "backups">("console");
 
+  // The backup watch lives here rather than in the tab, so switching to the
+  // console while the mod zips does not throw the wait away.
+  const [watch, setWatch] = useState<{ known: string[]; startedAt: number } | null>(null);
+  const [fresh, setFresh] = useState<Backup | null>(null);
+  const [gaveUp, setGaveUp] = useState(false);
+
+  // One shared query key, so the tab reads the same cache this poll fills.
+  const backups = useQuery({
+    queryKey: ["backups", name],
+    queryFn: () => api.backups(name),
+    refetchInterval: watch ? 2000 : false,
+  });
+
+  useEffect(() => {
+    if (!watch || !backups.data) return;
+    const added = backups.data.find((b) => !watch.known.includes(b.file));
+    if (added) {
+      setFresh(added);
+      setWatch(null);
+      return;
+    }
+    // The mod zips in the background and says nothing when it finishes, so the
+    // only honest end to the wait is a file appearing or a deadline passing.
+    if (Date.now() - watch.startedAt > 180_000) {
+      setWatch(null);
+      setGaveUp(true);
+    }
+  }, [backups.data, watch]);
+
   const instances = useQuery({ queryKey: ["instances"], queryFn: api.instances });
   const inst = instances.data?.find((i) => i.name === name);
 
@@ -213,9 +242,23 @@ function Detail({ name, onBack }: { name: string; onBack: () => void }) {
         {tab === "console" ? (
           <Console name={name} inst={inst} online={online} />
         ) : (
-          <Backups name={name} online={online} rconReady={!!inst?.rcon_ready} />
+          <Backups
+            name={name}
+            online={online}
+            rconReady={!!inst?.rcon_ready}
+            watching={!!watch}
+            gaveUp={gaveUp}
+            freshFile={fresh?.file ?? null}
+            onStarted={(known) => {
+              setFresh(null);
+              setGaveUp(false);
+              setWatch({ known, startedAt: Date.now() });
+            }}
+          />
         )}
       </div>
+
+      {fresh && <NewBackup b={fresh} onClose={() => setFresh(null)} />}
     </main>
   );
 }
@@ -358,10 +401,18 @@ function Backups({
   name,
   online,
   rconReady,
+  watching,
+  gaveUp,
+  freshFile,
+  onStarted,
 }: {
   name: string;
   online: boolean;
   rconReady: boolean;
+  watching: boolean;
+  gaveUp: boolean;
+  freshFile: string | null;
+  onStarted: (known: string[]) => void;
 }) {
   const qc = useQueryClient();
   const refresh = () => {
@@ -377,9 +428,14 @@ function Backups({
   });
 
   const create = useMutation({
-    mutationFn: () => api.createBackup(name),
-    // The mod zips in the background, so the file appears a moment later.
-    onSuccess: () => setTimeout(refresh, 8000),
+    // The file names are captured before the command goes out, so the watch
+    // knows exactly which entry is the new one.
+    mutationFn: async () => {
+      const known = (list.data ?? []).map((b) => b.file);
+      const res = await api.createBackup(name);
+      return { known, reply: res.reply };
+    },
+    onSuccess: ({ known }) => onStarted(known),
   });
   const rollback = useMutation({
     mutationFn: (file: string) => api.restoreBackup(name, file),
@@ -389,24 +445,31 @@ function Backups({
     mutationFn: (dir: string) => api.undoRollback(name, dir),
     onSuccess: refresh,
   });
-  const drop = useMutation({
+  const dropRollback = useMutation({
     mutationFn: (dir: string) => api.deleteRollback(name, dir),
+    onSuccess: refresh,
+  });
+  const dropBackup = useMutation({
+    mutationFn: (file: string) => api.deleteBackup(name, file),
     onSuccess: refresh,
   });
 
   const [confirming, setConfirming] = useState<Backup | null>(null);
-  const [dropping, setDropping] = useState<string | null>(null);
+  const [droppingRollback, setDroppingRollback] = useState<string | null>(null);
+  const [droppingBackup, setDroppingBackup] = useState<string | null>(null);
   const working = rollback.isPending || undo.isPending;
+  const backingUp = create.isPending || watching;
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-4">
       <div className="mb-4 flex items-center gap-3">
         <button
           onClick={() => create.mutate()}
-          disabled={!online || !rconReady || create.isPending || working}
-          className="rounded bg-panel px-3 py-1.5 text-sm text-ink disabled:opacity-30"
+          disabled={!online || !rconReady || backingUp || working}
+          className="flex items-center gap-2 rounded bg-panel px-3 py-1.5 text-sm text-ink disabled:opacity-30"
         >
-          back up now
+          {backingUp && <Spinner />}
+          {backingUp ? "backing up" : "back up now"}
         </button>
         <span className="text-xs text-mute">
           {!rconReady
@@ -415,14 +478,23 @@ function Backups({
               ? "the server has to be running"
               : create.isPending
                 ? "asking the server…"
-                : "runs the server's own backup command"}
+                : watching
+                  ? "the mod is zipping the world, this can take a minute"
+                  : "runs the server's own backup command"}
         </span>
       </div>
 
       {create.error && <Problem error={create.error} />}
       {rollback.error && <Problem error={rollback.error} />}
       {undo.error && <Problem error={undo.error} />}
-      {drop.error && <Problem error={drop.error} />}
+      {dropRollback.error && <Problem error={dropRollback.error} />}
+      {dropBackup.error && <Problem error={dropBackup.error} />}
+      {gaveUp && (
+        <p className="mb-3 rounded border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">
+          no new backup showed up after three minutes. the command was sent, so check the console
+          for what the mod said.
+        </p>
+      )}
       {working && (
         <p className="mb-3 rounded border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">
           working. this stops the server, swaps the world and starts it again, so it takes a few
@@ -452,14 +524,14 @@ function Backups({
               <RollbackRow
                 key={r.dir}
                 r={r}
-                busy={working || drop.isPending}
-                confirmingDelete={dropping === r.dir}
+                busy={working || dropRollback.isPending}
+                confirmingDelete={droppingRollback === r.dir}
                 onUndo={() => undo.mutate(r.dir)}
-                onAskDelete={() => setDropping(r.dir)}
-                onCancelDelete={() => setDropping(null)}
+                onAskDelete={() => setDroppingRollback(r.dir)}
+                onCancelDelete={() => setDroppingRollback(null)}
                 onDelete={() => {
-                  setDropping(null);
-                  drop.mutate(r.dir);
+                  setDroppingRollback(null);
+                  dropRollback.mutate(r.dir);
                 }}
               />
             ))}
@@ -472,16 +544,32 @@ function Backups({
 
       <h2 className="mb-2 text-xs text-mute">backups the server made</h2>
       <ul className="space-y-2">
+        {watching && <PendingRow />}
         {list.data?.map((b) => (
           <BackupRow
             key={b.file}
             b={b}
-            busy={working}
+            busy={working || dropBackup.isPending}
+            isNew={b.file === freshFile}
+            confirmingDelete={droppingBackup === b.file}
             onAsk={() => setConfirming(b)}
+            onAskDelete={() => setDroppingBackup(b.file)}
+            onCancelDelete={() => setDroppingBackup(null)}
+            onDelete={() => {
+              setDroppingBackup(null);
+              dropBackup.mutate(b.file);
+            }}
           />
         ))}
       </ul>
-      {list.data?.length === 0 && <p className="text-xs text-mute">no backups on disk</p>}
+      {list.data?.length === 0 && !watching && (
+        <p className="text-xs text-mute">no backups on disk</p>
+      )}
+      {list.data && list.data.length > 0 && (
+        <p className="mt-2 text-[11px] text-faint">
+          the backup mod keeps the newest 5 and deletes the rest on its own.
+        </p>
+      )}
 
       {confirming && (
         <ConfirmRollback
@@ -494,6 +582,59 @@ function Backups({
           }}
         />
       )}
+    </div>
+  );
+}
+
+function Spinner() {
+  return (
+    <span className="size-3 shrink-0 animate-spin rounded-full border border-mute border-t-transparent" />
+  );
+}
+
+// PendingRow stands in for the file the mod has not finished writing, so the
+// list shows the backup arriving instead of sitting unchanged for a minute.
+function PendingRow() {
+  return (
+    <li className="flex items-center gap-3 rounded border border-dashed border-edge p-2">
+      <span className="flex size-12 shrink-0 items-center justify-center rounded bg-edge">
+        <Spinner />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="text-xs text-mute">zipping the world…</div>
+        <div className="text-[11px] text-faint">appears here when the mod is done</div>
+      </div>
+    </li>
+  );
+}
+
+// NewBackup is the pop that confirms the file landed. It carries the map
+// thumbnail so it is obvious which world was captured.
+function NewBackup({ b, onClose }: { b: Backup; onClose: () => void }) {
+  // Long enough to read, short enough not to sit over the list.
+  useEffect(() => {
+    const t = setTimeout(onClose, 12_000);
+    return () => clearTimeout(t);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-x-0 bottom-0 z-20 p-4">
+      <div className="mx-auto flex max-w-3xl items-center gap-3 rounded border border-live/40 bg-panel p-3 shadow-lg">
+        {b.preview ? (
+          <img src={b.preview} alt="" className="size-12 shrink-0 rounded object-cover" />
+        ) : (
+          <span className="size-12 shrink-0 rounded bg-edge" />
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="text-sm text-live">backup done</div>
+          <div className="truncate text-[11px] text-mute">
+            {new Date(b.created).toLocaleString()} · {bytes(b.size)}
+          </div>
+        </div>
+        <button onClick={onClose} className="shrink-0 px-2 text-xs text-mute hover:text-ink">
+          dismiss
+        </button>
+      </div>
     </div>
   );
 }
@@ -597,28 +738,81 @@ function RollbackRow({
   );
 }
 
-function BackupRow({ b, busy, onAsk }: { b: Backup; busy: boolean; onAsk: () => void }) {
+function BackupRow({
+  b,
+  busy,
+  isNew,
+  confirmingDelete,
+  onAsk,
+  onAskDelete,
+  onCancelDelete,
+  onDelete,
+}: {
+  b: Backup;
+  busy: boolean;
+  isNew: boolean;
+  confirmingDelete: boolean;
+  onAsk: () => void;
+  onAskDelete: () => void;
+  onCancelDelete: () => void;
+  onDelete: () => void;
+}) {
   return (
-    <li className="flex items-center gap-3 rounded border border-edge bg-panel p-2">
-      {/* FTB Backups 2 stores a map thumbnail in backups.json. */}
-      {b.preview ? (
-        <img src={b.preview} alt="" className="size-12 shrink-0 rounded object-cover" />
-      ) : (
-        <span className="size-12 shrink-0 rounded bg-edge" />
-      )}
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-xs">{since(b.created)} ago</div>
-        <div className="truncate text-[11px] text-faint">
-          {new Date(b.created).toLocaleString()} · {bytes(b.size)}
+    <li
+      className={`rounded border bg-panel p-2 ${
+        isNew ? "border-live/50" : "border-edge"
+      }`}
+    >
+      <div className="flex items-center gap-3">
+        {/* FTB Backups 2 stores a map thumbnail in backups.json. */}
+        {b.preview ? (
+          <img src={b.preview} alt="" className="size-12 shrink-0 rounded object-cover" />
+        ) : (
+          <span className="size-12 shrink-0 rounded bg-edge" />
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="truncate text-xs">{since(b.created)} ago</span>
+            {isNew && (
+              <span className="shrink-0 rounded bg-live/15 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-live">
+                new
+              </span>
+            )}
+          </div>
+          <div className="truncate text-[11px] text-faint">
+            {new Date(b.created).toLocaleString()} · {bytes(b.size)}
+          </div>
         </div>
+        {!confirmingDelete && (
+          <div className="flex shrink-0 gap-3">
+            <button
+              onClick={onAsk}
+              disabled={busy}
+              className="text-xs text-mute underline underline-offset-2 hover:text-ink disabled:opacity-30"
+            >
+              roll back
+            </button>
+            <button
+              onClick={onAskDelete}
+              disabled={busy}
+              className="text-xs text-faint hover:text-bad disabled:opacity-30"
+            >
+              delete
+            </button>
+          </div>
+        )}
       </div>
-      <button
-        onClick={onAsk}
-        disabled={busy}
-        className="shrink-0 text-xs text-mute underline underline-offset-2 hover:text-ink disabled:opacity-30"
-      >
-        roll back
-      </button>
+      {confirmingDelete && (
+        <div className="mt-2 flex items-center gap-2 border-t border-edge pt-2">
+          <span className="flex-1 text-[11px] text-bad">delete this backup file?</span>
+          <button onClick={onDelete} className="rounded bg-bad/20 px-2 py-1 text-xs text-bad">
+            delete
+          </button>
+          <button onClick={onCancelDelete} className="px-2 py-1 text-xs text-mute">
+            cancel
+          </button>
+        </div>
+      )}
     </li>
   );
 }

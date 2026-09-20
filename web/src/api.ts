@@ -134,6 +134,8 @@ export const api = {
       `/v1/instances/${name}/backups/${encodeURIComponent(file)}/restore`,
       { method: "POST" },
     ),
+  deleteBackup: (name: string, file: string) =>
+    call<void>(`/v1/instances/${name}/backups/${encodeURIComponent(file)}`, { method: "DELETE" }),
   rollbacks: (name: string) => call<Rollback[]>(`/v1/instances/${name}/rollbacks`),
   undoRollback: (name: string, dir: string) =>
     call<{ previous_world: string; restarted: boolean }>(

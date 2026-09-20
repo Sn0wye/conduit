@@ -294,6 +294,21 @@ func (s *Server) WarmDisk(ctx context.Context) {
 	}
 }
 
+func (s *Server) deleteBackup(w http.ResponseWriter, r *http.Request) error {
+	name := r.PathValue("name")
+	return s.busyWork(w, name, "deleting a backup", func() error {
+		inst, err := s.db.GetInstance(r.Context(), name)
+		if err != nil {
+			return err
+		}
+		if err := backups.Delete(inst.Dir, r.PathValue("file")); err != nil {
+			return err
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return nil
+	})
+}
+
 // --- rollbacks ---
 //
 // A rollback is the world Conduit moved aside before a restore overwrote it.
