@@ -65,6 +65,7 @@ func run(authKey, claim string, dev bool, devAddr string) error {
 	}
 	apiSrv := api.New(db, set)
 	apiSrv.WarmDisk(ctx)
+	go apiSrv.ReapRCON(ctx)
 
 	// Fail loudly at startup rather than on the first start request. pm2 is a
 	// node script, so a missing node_bin_dir breaks it even when the pm2 path

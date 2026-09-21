@@ -17,6 +17,7 @@ import (
 
 	"github.com/snowye/conduit/internal/backups"
 	"github.com/snowye/conduit/internal/pm2"
+	"github.com/snowye/conduit/internal/rcon"
 	"github.com/snowye/conduit/internal/settings"
 	"github.com/snowye/conduit/internal/store"
 )
@@ -39,11 +40,17 @@ type Server struct {
 	// would unzip into a directory the first one is still renaming.
 	busyMu sync.Mutex
 	busy   map[string]string
+
+	// rcons holds the RCON connections that are currently open, one per
+	// instance. A session exists only while a console is on screen; nothing
+	// here dials on its own.
+	rconMu sync.Mutex
+	rcons  map[string]*rcon.Session
 }
 
 func New(db *store.DB, set settings.Settings) *Server {
 	return &Server{db: db, set: set, pm: pm2.New(set.PM2Bin, set.NodeBinDir),
-		busy: map[string]string{}}
+		busy: map[string]string{}, rcons: map[string]*rcon.Session{}}
 }
 
 // errBusy is returned as 409 rather than queued. Waiting silently behind
@@ -137,6 +144,8 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("GET /v1/instances/{name}/logs", handle(s.logs))
 	mux.HandleFunc("GET /v1/instances/{name}/stats", handle(s.stats))
 	mux.HandleFunc("POST /v1/instances/{name}/console", handle(s.console))
+	mux.HandleFunc("POST /v1/instances/{name}/console/open", handle(s.openConsole))
+	mux.HandleFunc("POST /v1/instances/{name}/console/close", handle(s.closeConsole))
 	mux.HandleFunc("POST /v1/instances/{name}/rcon", handle(s.enableRCON))
 	mux.HandleFunc("GET /v1/instances/{name}/backups", handle(s.listBackups))
 	mux.HandleFunc("DELETE /v1/instances/{name}/backups/{file}", handle(s.deleteBackup))
@@ -381,6 +390,9 @@ func (s *Server) startLocked(w http.ResponseWriter, r *http.Request, name string
 // SIGINT and Minecraft's own shutdown handler saving the world. Once RCON is
 // enabled per instance this sends "stop" first and waits for a clean exit.
 func (s *Server) stopApp(ctx context.Context, name string) error {
+	// The connection dies with the server, so drop it here rather than
+	// letting the next command discover a socket to nowhere.
+	s.closeSession(name)
 	if err := s.client().Stop(ctx, name); err != nil {
 		return err
 	}

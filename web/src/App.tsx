@@ -128,7 +128,10 @@ function Detail({ name, onBack }: { name: string; onBack: () => void }) {
     qc.invalidateQueries({ queryKey: ["stats", name] });
   };
 
-  const [tab, setTab] = useState<"console" | "backups">("console");
+  // The log tab is the default on purpose. Opening the console opens an RCON
+  // connection, and nothing should open one just because a screen was looked
+  // at.
+  const [tab, setTab] = useState<"logs" | "console" | "backups">("logs");
 
   // The backup watch lives here rather than in the tab, so switching to the
   // console while the mod zips does not throw the wait away.
@@ -217,7 +220,7 @@ function Detail({ name, onBack }: { name: string; onBack: () => void }) {
       {err && <Problem error={err} />}
 
       <div className="flex gap-4 border-b border-edge px-4">
-        {(["console", "backups"] as const).map((t) => (
+        {(["logs", "console", "backups"] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -236,7 +239,9 @@ function Detail({ name, onBack }: { name: string; onBack: () => void }) {
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col">
-        {tab === "console" ? (
+        {tab === "logs" ? (
+          <LogPane name={name} />
+        ) : tab === "console" ? (
           <Console name={name} inst={inst} online={online} />
         ) : (
           <Backups
@@ -263,12 +268,16 @@ function Detail({ name, onBack }: { name: string; onBack: () => void }) {
 function Stats({ stats, online }: { stats?: import("./api").Stats; online: boolean }) {
   const d = stats?.disk;
   const count = stats?.players_online ?? -1;
-  const players =
-    online && count >= 0 ? `${count}/${stats?.players_max ?? "?"}` : online ? "—" : "—";
+  // The count comes over RCON, and RCON is only connected while the console
+  // tab is open. A dash says "not being read" rather than "nobody online".
+  const players = online && stats?.rcon_open && count >= 0 ? `${count}/${stats?.players_max ?? "?"}` : "—";
+  const who = stats?.rcon_open
+    ? stats?.players?.join(", ")
+    : "open the console tab to read the player list";
 
   return (
     <div className="grid grid-cols-5 gap-px border-y border-edge bg-edge text-center">
-      <Cell label="players" value={players} title={stats?.players?.join(", ")} />
+      <Cell label="players" value={players} title={who} />
       <Cell label="cpu" value={online ? `${(stats?.cpu_pct ?? 0).toFixed(0)}%` : "—"} />
       <Cell
         label="memory"
@@ -291,40 +300,20 @@ function Cell({ label, value, title }: { label: string; value: string; title?: s
   );
 }
 
-// Console is the log pane plus an RCON input. The log pane follows the tail
-// unless you scroll up, which is the one behaviour that makes a log readable.
-function Console({
-  name,
-  inst,
-  online,
-}: {
-  name: string;
-  inst?: Instance;
-  online: boolean;
-}) {
-  const qc = useQueryClient();
+// LogPane is the tail of the server's own log file. It needs no RCON, which is
+// why it is its own tab: watching the log is the common case and it should not
+// cost a connection. The pane follows the tail unless you scroll up, which is
+// the one behaviour that makes a log readable.
+function LogPane({ name, extra }: { name: string; extra?: string[] }) {
   const logs = useQuery({
     queryKey: ["logs", name],
     queryFn: () => api.logs(name),
     refetchInterval: 4000,
   });
-  const [sent, setSent] = useState<string[]>([]);
-  const [cmd, setCmd] = useState("");
 
-  const run = useMutation({
-    mutationFn: (c: string) => api.console(name, c),
-    onSuccess: (res) =>
-      setSent((s) => [...s, `> ${res.command}`, res.reply || "(no reply)"]),
-    onError: (e: Error, c) => setSent((s) => [...s, `> ${c}`, e.message]),
-  });
-
-  const enable = useMutation({
-    mutationFn: () => api.enableRcon(name),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["instances"] }),
-  });
-
-  const body = (logs.data ?? (logs.error ? String(logs.error) : "…")) +
-    (sent.length ? "\n" + sent.join("\n") : "");
+  const body =
+    (logs.data ?? (logs.error ? String(logs.error) : "…")) +
+    (extra?.length ? "\n" + extra.join("\n") : "");
 
   const pane = useRef<HTMLPreElement>(null);
   const stick = useRef(true);
@@ -341,17 +330,67 @@ function Console({
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   }, [body]);
 
+  return (
+    <pre
+      ref={pane}
+      onScroll={onScroll}
+      className="mx-4 mt-3 min-h-0 flex-1 overflow-auto rounded border border-edge bg-panel p-3 text-[11px] leading-relaxed text-mute"
+    >
+      {body}
+    </pre>
+  );
+}
+
+// Console is the log pane plus an RCON input. Opening this tab is what opens
+// the connection, and it is held until the tab goes away: a connection per
+// command wrote a connect and a disconnect line into the server log every few
+// seconds and buried everything else.
+function Console({
+  name,
+  inst,
+  online,
+}: {
+  name: string;
+  inst?: Instance;
+  online: boolean;
+}) {
+  const qc = useQueryClient();
+  const [sent, setSent] = useState<string[]>([]);
+  const [cmd, setCmd] = useState("");
+
   const rconOff = !inst?.rcon_ready;
+
+  const [connectError, setConnectError] = useState<string | null>(null);
+  useEffect(() => {
+    if (rconOff || !online) return;
+    let gone = false;
+    api
+      .openConsole(name)
+      .then(() => !gone && setConnectError(null))
+      .catch((e: Error) => !gone && setConnectError(e.message));
+    return () => {
+      gone = true;
+      // Hang up on the way out. Best effort: if the tab is being closed the
+      // request may never land, and the agent drops idle sessions anyway.
+      api.closeConsole(name).catch(() => {});
+      qc.invalidateQueries({ queryKey: ["stats", name] });
+    };
+  }, [name, rconOff, online, qc]);
+
+  const run = useMutation({
+    mutationFn: (c: string) => api.console(name, c),
+    onSuccess: (res) => setSent((s) => [...s, `> ${res.command}`, res.reply || "(no reply)"]),
+    onError: (e: Error, c) => setSent((s) => [...s, `> ${c}`, e.message]),
+  });
+
+  const enable = useMutation({
+    mutationFn: () => api.enableRcon(name),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["instances"] }),
+  });
 
   return (
     <>
-      <pre
-        ref={pane}
-        onScroll={onScroll}
-        className="mx-4 mt-3 min-h-0 flex-1 overflow-auto rounded border border-edge bg-panel p-3 text-[11px] leading-relaxed text-mute"
-      >
-        {body}
-      </pre>
+      <LogPane name={name} extra={sent} />
 
       {rconOff ? (
         <div className="flex items-center gap-3 p-4">
@@ -390,6 +429,9 @@ function Console({
             run
           </button>
         </form>
+      )}
+      {connectError && (
+        <p className="px-4 pb-4 text-xs text-warn">rcon did not answer: {connectError}</p>
       )}
       {enable.data?.restart_required && (
         <p className="px-4 pb-4 text-xs text-warn">

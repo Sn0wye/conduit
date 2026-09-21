@@ -52,8 +52,11 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) error {
 		out["disk"] = d
 	}
 
-	if inst.RCONReady && out["status"] == "online" {
-		if reply, err := rcon.Once(rconAddr(inst), inst.RCONPass, "list"); err == nil {
+	// Players come from the console connection when one is open. Polling does
+	// not open one: RCON stays down until somebody asks for the console.
+	if sess := s.session(name); sess != nil && out["status"] == "online" {
+		out["rcon_open"] = true
+		if reply, err := sess.Exec("list"); err == nil {
 			online, max, names := parsePlayers(reply)
 			out["players_online"] = online
 			out["players_max"] = max
@@ -126,12 +129,48 @@ func (s *Server) console(w http.ResponseWriter, r *http.Request) error {
 		fail(w, 409, "rcon_off", errors.New("turn RCON on for this instance first"))
 		return nil
 	}
-	reply, err := rcon.Once(rconAddr(inst), inst.RCONPass, cmd)
+	// Reuse the console's own connection. If the tab never opened one, this
+	// opens it now and it stays for the rest of the sitting.
+	sess, err := s.openSession(inst)
+	if err != nil {
+		fail(w, 502, "rcon_failed", err)
+		return nil
+	}
+	reply, err := sess.Exec(cmd)
 	if err != nil {
 		fail(w, 502, "rcon_failed", err)
 		return nil
 	}
 	writeJSON(w, 200, map[string]any{"command": cmd, "reply": reply})
+	return nil
+}
+
+// openConsole brings the connection up and leaves it up. The console tab calls
+// this when it mounts, so the connection is made once per sitting instead of
+// once per command, and the server log stops filling with connect lines.
+func (s *Server) openConsole(w http.ResponseWriter, r *http.Request) error {
+	inst, err := s.db.GetInstance(r.Context(), r.PathValue("name"))
+	if err != nil {
+		return err
+	}
+	if !inst.RCONReady {
+		fail(w, 409, "rcon_off", errors.New("turn RCON on for this instance first"))
+		return nil
+	}
+	if _, err := s.openSession(inst); err != nil {
+		fail(w, 502, "rcon_failed", err)
+		return nil
+	}
+	writeJSON(w, 200, map[string]any{"name": inst.Name, "connected": true})
+	return nil
+}
+
+// closeConsole hangs up when the tab goes away. Not required for correctness,
+// the reaper would get there eventually, but leaving the socket open on a
+// screen nobody is watching is exactly what this change is about.
+func (s *Server) closeConsole(w http.ResponseWriter, r *http.Request) error {
+	s.closeSession(r.PathValue("name"))
+	w.WriteHeader(http.StatusNoContent)
 	return nil
 }
 
@@ -252,7 +291,15 @@ func (s *Server) createBackupLocked(w http.ResponseWriter, r *http.Request, name
 	if cmd == "" {
 		cmd = "backup start"
 	}
-	reply, err := rcon.Once(rconAddr(inst), inst.RCONPass, cmd)
+	// Taking a backup is an explicit click, so it is allowed to dial. It reuses
+	// the console connection when there is one and hangs up when there is not,
+	// rather than leaving a connection behind for a tab nobody opened.
+	reply, err := "", error(nil)
+	if sess := s.session(name); sess != nil {
+		reply, err = sess.Exec(cmd)
+	} else {
+		reply, err = rcon.Once(rconAddr(inst), inst.RCONPass, cmd)
+	}
 	if err != nil {
 		fail(w, 502, "rcon_failed", err)
 		return nil

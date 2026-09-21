@@ -51,6 +51,8 @@ export type Stats = {
   players_online?: number;
   players_max?: number;
   players?: string[];
+  // true while a console connection is open. Players are only readable then.
+  rcon_open?: boolean;
 };
 
 export type Backup = {
@@ -125,6 +127,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ command }),
     }),
+  // The console connection is opened when the console tab mounts and closed
+  // when it goes away. Nothing else opens one, so a server nobody is watching
+  // has no RCON connection at all.
+  openConsole: (name: string) =>
+    call<{ connected: boolean }>(`/v1/instances/${name}/console/open`, { method: "POST" }),
+  closeConsole: (name: string) =>
+    call<void>(`/v1/instances/${name}/console/close`, { method: "POST" }),
   enableRcon: (name: string) =>
     call<{ restart_required: boolean; connected: boolean; already_enabled: boolean }>(
       `/v1/instances/${name}/rcon`,
