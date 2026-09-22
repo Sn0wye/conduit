@@ -482,6 +482,16 @@ func writeEntry(f *zip.File, target string) error {
 		mode |= 0o111
 	}
 	out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	// A pack that ships its files read-only leaves them read-only on disk, and
+	// the next upgrade cannot open them for writing even though the directory
+	// is ours. The mode argument above only applies to a file being created.
+	// Replacing the file is the overlay's whole intent, so drop it and write a
+	// fresh one rather than failing the upgrade on a permission bit.
+	if errors.Is(err, os.ErrPermission) {
+		if rmErr := os.Remove(target); rmErr == nil {
+			out, err = os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+		}
+	}
 	if err != nil {
 		return err
 	}

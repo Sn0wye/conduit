@@ -317,3 +317,33 @@ func TestStageIsContentAddressed(t *testing.T) {
 		t.Fatalf("find: %+v %v", got, err)
 	}
 }
+
+// Packs ship documentation and scripts read-only, and unzip keeps that bit. A
+// second upgrade must still be able to overwrite those files: the first one
+// failing on HOW-TO-RUN.md is exactly the report this test exists for.
+func TestApplyOverwritesReadOnlyFiles(t *testing.T) {
+	dir := t.TempDir()
+	doc := filepath.Join(dir, "HOW-TO-RUN.md")
+	write(t, doc, "old instructions")
+	if err := os.Chmod(doc, 0o444); err != nil {
+		t.Fatal(err)
+	}
+
+	zipPath := packZip(t, filepath.Join(t.TempDir(), "pack.zip"), map[string]string{
+		"mods/a.jar": "a", "HOW-TO-RUN.md": "new instructions",
+	})
+	l, err := Probe(zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(dir, zipPath, l); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "new instructions" {
+		t.Fatalf("HOW-TO-RUN.md is %q, want the version from the pack", got)
+	}
+}
