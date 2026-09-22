@@ -13,5 +13,10 @@ build: web
 dev:
 	CGO_ENABLED=0 go run ./cmd/conduitd --dev
 
+# Build and install on one tailnet machine: make deploy HOST=ubuntu@snowye
+deploy:
+	@test -n "$(HOST)" || (echo "usage: make deploy HOST=[user@]host" >&2; exit 2)
+	scripts/deploy.sh $(HOST)
+
 clean:
 	rm -rf dist web/dist
