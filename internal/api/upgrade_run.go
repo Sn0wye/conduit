@@ -150,7 +150,11 @@ func (s *Server) upgradeSteps(ctx context.Context, inst store.Instance, a upgrad
 		x.finish("failed", err.Error()+"; the old files are back")
 		return 0, err
 	}
-	x.finish("done", fmt.Sprintf("%d files, %d mods, kept %s", rep.Files, rep.Mods, keptList(rep.Preserved)))
+	detail := fmt.Sprintf("%d files, %d mods, kept %s", rep.Files, rep.Mods, keptList(rep.Preserved))
+	if len(rep.Replaced) > 0 {
+		detail += ", replaced " + strings.Join(rep.Replaced, "/, ") + "/"
+	}
+	x.finish("done", detail)
 
 	x.begin("record the version")
 	if err := s.db.SetVersionState(ctx, prev.ID, "superseded", "replaced by "+label); err != nil {

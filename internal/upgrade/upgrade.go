@@ -43,6 +43,36 @@ var preserved = map[string]bool{
 	"user_jvm_args.txt":   true,
 }
 
+// replaced are the trees a pack owns whole. They are cleared before the overlay
+// runs, because a file the new pack no longer ships is not a leftover here, it
+// is a bug: kubejs evaluates every script it finds in one scope, so a renamed
+// script from the old pack is loaded twice under two names and the second
+// declaration throws. mods/ has the same shape with jars.
+//
+// config/ is deliberately not in this set. A pack ships defaults there and the
+// operator edits them, and those edits must survive an upgrade.
+var replaced = []string{"mods", "kubejs", "scripts", "defaultconfigs"}
+
+// replacedTrees is the subset of replaced that this pack actually ships. A pack
+// without a kubejs/ directory is a pack that does not use kubejs, and clearing
+// the instance's own kubejs/ on its behalf would delete files nothing replaces.
+func replacedTrees(zr *zip.ReadCloser, l Layout) []string {
+	prefix := ""
+	if l.Root != "" {
+		prefix = l.Root + "/"
+	}
+	var out []string
+	for _, tree := range replaced {
+		for _, f := range zr.File {
+			if strings.HasPrefix(f.Name, prefix+tree+"/") {
+				out = append(out, tree)
+				break
+			}
+		}
+	}
+	return out
+}
+
 // owned reports whether a top-level entry of the instance directory belongs to
 // the pack rather than to the world or to the server's own output.
 //
@@ -218,13 +248,14 @@ type Report struct {
 	Files     int      `json:"files"`
 	Mods      int      `json:"mods"`
 	Preserved []string `json:"preserved"`
+	Replaced  []string `json:"replaced"`
 }
 
-// Apply overlays a pack onto a stopped instance. mods/ is deleted first rather
-// than merged: a jar the new pack dropped would otherwise stay behind, and a
-// stale mod is a crash at best and a corrupted world at worst. Everything else
-// is an overlay, so config files the pack no longer ships and anything hand
-// added survive.
+// Apply overlays a pack onto a stopped instance. The trees in replaced are
+// deleted first rather than merged: a file the new pack dropped would otherwise
+// stay behind, and a stale mod jar or a stale script is a crash at best and a
+// corrupted world at worst. Everything else is an overlay, so config files the
+// pack no longer ships and anything hand added survive.
 //
 // The caller must have stopped the server and taken a snapshot first. This
 // function does not check either, because it is also how a fresh install runs.
@@ -236,8 +267,11 @@ func Apply(dir, zipPath string, l Layout) (Report, error) {
 	}
 	defer zr.Close()
 
-	if err := os.RemoveAll(filepath.Join(dir, "mods")); err != nil {
-		return rep, fmt.Errorf("clear the old mods: %w", err)
+	for _, tree := range replacedTrees(zr, l) {
+		if err := os.RemoveAll(filepath.Join(dir, tree)); err != nil {
+			return rep, fmt.Errorf("clear the old %s: %w", tree, err)
+		}
+		rep.Replaced = append(rep.Replaced, tree)
 	}
 
 	prefix := ""

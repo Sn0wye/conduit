@@ -347,3 +347,69 @@ func TestApplyOverwritesReadOnlyFiles(t *testing.T) {
 		t.Fatalf("HOW-TO-RUN.md is %q, want the version from the pack", got)
 	}
 }
+
+// The bug this pins: a pack renamed a kubejs script, the old file survived the
+// overlay, and kubejs loaded both copies and threw on the duplicate const.
+// Trees the pack owns whole are cleared; config/ and the world are not.
+func TestApplyClearsScriptTreesTheNewPackOwns(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "kubejs", "server_scripts", "recipes.js"), "const A = 1")
+	write(t, filepath.Join(dir, "scripts", "old.zs"), "old")
+	write(t, filepath.Join(dir, "defaultconfigs", "gone.toml"), "old")
+	write(t, filepath.Join(dir, "config", "mine.toml"), "hand edited")
+	write(t, filepath.Join(dir, "world", "level.dat"), "save")
+
+	zipPath := packZip(t, filepath.Join(t.TempDir(), "pack.zip"), map[string]string{
+		"mods/a.jar":                        "a",
+		"kubejs/server_scripts/recipes1.js": "const A = 1",
+		"scripts/new.zs":                    "new",
+		"defaultconfigs/kept.toml":          "new",
+	})
+	l, err := Probe(zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(dir, zipPath, l); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, gone := range []string{
+		filepath.Join("kubejs", "server_scripts", "recipes.js"),
+		filepath.Join("scripts", "old.zs"),
+		filepath.Join("defaultconfigs", "gone.toml"),
+	} {
+		if _, err := os.Stat(filepath.Join(dir, gone)); !os.IsNotExist(err) {
+			t.Errorf("%s survived the upgrade", gone)
+		}
+	}
+	for _, kept := range []string{
+		filepath.Join("kubejs", "server_scripts", "recipes1.js"),
+		filepath.Join("config", "mine.toml"),
+		filepath.Join("world", "level.dat"),
+	} {
+		if _, err := os.Stat(filepath.Join(dir, kept)); err != nil {
+			t.Errorf("%s should still be there: %v", kept, err)
+		}
+	}
+}
+
+// A pack that ships no kubejs/ does not get to delete the instance's kubejs/.
+// Nothing would replace it.
+func TestApplyLeavesTreesThePackDoesNotShip(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "kubejs", "server_scripts", "mine.js"), "mine")
+
+	zipPath := packZip(t, filepath.Join(t.TempDir(), "pack.zip"), map[string]string{
+		"mods/a.jar": "a",
+	})
+	l, err := Probe(zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(dir, zipPath, l); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "kubejs", "server_scripts", "mine.js")); err != nil {
+		t.Errorf("kubejs was cleared by a pack that ships none: %v", err)
+	}
+}
