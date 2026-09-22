@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/snowye/conduit/internal/settings"
@@ -28,9 +30,10 @@ type Owner interface {
 	SetSetting(ctx context.Context, key, value string) error
 }
 
-// Auth is the only access control in Conduit. The agent listens on the tsnet
-// interface alone, so the tailnet ACL is the real boundary. On top of that the
-// first login to call the machine claims it and everyone else gets 403.
+// Auth is the only access control in Conduit. The agent listens on a tailnet
+// address alone, so the tailnet ACL is the real boundary. On top of that the
+// first login to call the machine claims it, and everyone else gets 403 unless
+// the owner has named them as a guest.
 //
 // Pass a nil Owner to skip the claim check entirely, which is what dev mode
 // does so a local run never writes "dev" into the database.
@@ -39,6 +42,10 @@ func Auth(id Identify, owner Owner) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			user, err := id(r.Context(), r.RemoteAddr)
 			if err != nil {
+				// Refusals are the one thing worth logging: a denied caller
+				// sees a bare 403 and cannot tell the operator why, and the
+				// operator has no other record that the attempt happened.
+				log.Printf("denied %s: whois failed: %v", r.RemoteAddr, err)
 				fail(w, http.StatusForbidden, "whois_failed", err)
 				return
 			}
@@ -56,9 +63,18 @@ func Auth(id Identify, owner Owner) func(http.Handler) http.Handler {
 					}
 				case user:
 				default:
-					fail(w, http.StatusForbidden, "not_owner",
-						errors.New("this machine belongs to "+claimed))
-					return
+					guests, err := owner.Setting(r.Context(), settings.KeyGuests)
+					if err != nil {
+						fail(w, http.StatusInternalServerError, "internal", err)
+						return
+					}
+					if !slices.Contains(settings.ParseGuests(guests), user) {
+						log.Printf("denied %s from %s: machine belongs to %s, guests are %q",
+							user, r.RemoteAddr, claimed, guests)
+						fail(w, http.StatusForbidden, "not_owner",
+							errors.New("this machine belongs to "+claimed))
+						return
+					}
 				}
 			}
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey, user)))

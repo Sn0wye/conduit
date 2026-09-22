@@ -28,18 +28,20 @@ func main() {
 	var (
 		authKey = flag.String("authkey", os.Getenv("TS_AUTHKEY"), "tailscale auth key, optional; without it the first run prints a login URL")
 		claim   = flag.String("claim", "", "reset the owning tailnet login and exit")
+		allow   = flag.String("allow", "", "let this tailnet login use the machine alongside the owner, and exit")
+		revoke  = flag.String("revoke", "", "take back the access granted by --allow, and exit")
 		dev     = flag.Bool("dev", false, "serve plain http on localhost and skip tailnet identity")
 		devAddr = flag.String("dev-addr", "127.0.0.1:8420", "listen address in dev mode")
 		host    = flag.String("host-port", "", "serve on this port of the machine's own tailnet address, using the tailscaled already running here instead of joining as a second node")
 	)
 	flag.Parse()
 
-	if err := run(*authKey, *claim, *dev, *devAddr, *host); err != nil {
+	if err := run(*authKey, *claim, *allow, *revoke, *dev, *devAddr, *host); err != nil {
 		log.Fatalf("conduitd: %v", err)
 	}
 }
 
-func run(authKey, claim string, dev bool, devAddr, hostPort string) error {
+func run(authKey, claim, allow, revoke string, dev bool, devAddr, hostPort string) error {
 	if err := settings.EnsureDirs(); err != nil {
 		return err
 	}
@@ -57,6 +59,33 @@ func run(authKey, claim string, dev bool, devAddr, hostPort string) error {
 			return err
 		}
 		log.Printf("this machine now belongs to %s", claim)
+		return nil
+	}
+
+	if allow != "" || revoke != "" {
+		stored, err := db.Setting(ctx, settings.KeyGuests)
+		if err != nil {
+			return err
+		}
+		login, changed := allow, false
+		if allow != "" {
+			stored, changed = settings.AddGuest(stored, allow)
+		} else {
+			login = revoke
+			stored, changed = settings.RemoveGuest(stored, revoke)
+		}
+		if !changed {
+			log.Printf("nothing to do for %s", login)
+			return nil
+		}
+		if err := db.SetSetting(ctx, settings.KeyGuests, stored); err != nil {
+			return err
+		}
+		if allow != "" {
+			log.Printf("%s may now use this machine", login)
+		} else {
+			log.Printf("%s may no longer use this machine", login)
+		}
 		return nil
 	}
 

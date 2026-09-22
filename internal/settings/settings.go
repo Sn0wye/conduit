@@ -37,7 +37,49 @@ const (
 	KeyServersRoot   = "servers_root"
 	KeyCurseForgeKey = "curseforge_key"
 	KeyOwner         = "owner"
+	// KeyGuests is a comma separated list of tailnet logins that may use the
+	// machine alongside the owner. Conduit stays single-operator: guests are
+	// named one by one, never a whole tailnet.
+	KeyGuests = "guests"
 )
+
+// ParseGuests splits a stored guest list. Blank entries are dropped so an
+// empty setting cannot accidentally admit the empty login.
+func ParseGuests(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// AddGuest returns the list with login added, and reports whether it was new.
+func AddGuest(v, login string) (string, bool) {
+	guests := ParseGuests(v)
+	for _, g := range guests {
+		if g == login {
+			return strings.Join(guests, ","), false
+		}
+	}
+	return strings.Join(append(guests, login), ","), true
+}
+
+// RemoveGuest returns the list with login dropped, and reports whether it was
+// there to begin with.
+func RemoveGuest(v, login string) (string, bool) {
+	var out []string
+	found := false
+	for _, g := range ParseGuests(v) {
+		if g == login {
+			found = true
+			continue
+		}
+		out = append(out, g)
+	}
+	return strings.Join(out, ","), found
+}
 
 type Reader interface {
 	Settings(ctx context.Context) (map[string]string, error)
