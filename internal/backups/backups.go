@@ -27,6 +27,11 @@ type Backup struct {
 	World    string    `json:"world,omitempty"`
 	Preview  string    `json:"preview,omitempty"` // data: URI thumbnail, when the mod stored one
 	Manifest bool      `json:"from_manifest"`
+	// Version is the pack version the server was running when this backup was
+	// taken. Nothing on disk records it: it is filled in by matching the time
+	// against the version history, so backups taken before Conduit existed and
+	// backups the mod made on its own schedule are both covered.
+	Version string `json:"version,omitempty"`
 }
 
 type manifest struct {

@@ -51,6 +51,10 @@ func Open(path string) (*DB, error) {
 		sq.Close()
 		return nil, err
 	}
+	if err := db.migrateVersions(); err != nil {
+		sq.Close()
+		return nil, err
+	}
 	return db, nil
 }
 

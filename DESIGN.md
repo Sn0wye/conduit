@@ -142,21 +142,44 @@ It exists because the server disables RCON outright when the field is blank.
 
 Port 25575 must stay closed in the Oracle security group.
 
-## Modpack update
+## Upgrades and versions
 
 No symlink farm, no version directories. The instance dir stays exactly where it is.
 
+The unit is the **version-owned set**: everything in the instance directory except
+`world*`, `backups/`, `logs/`, `crash-reports/` and `.conduit/`. Worlds are tens of
+gigabytes and must survive an upgrade; mods, configs, libraries and `run.sh` are hundreds
+of megabytes and are exactly what an upgrade replaces. Archiving only the second kind is
+what makes going back cheap and exact.
+
+A pack arrives either as a browser upload or as a path to a zip already on the box, and
+is cached at `~/.conduit/artifacts/<sha256>.zip` with a probe beside it. The zip is
+probed before anything is stopped: no `mods/`, no `run.sh` and no server jar means it is
+not a server pack and the instance is never touched. CurseForge client zips are read
+through `manifest.json` and `overrides/`.
+
 ```
-1. stop instance (graceful)
-2. tar.zst  mods/ config/ kubejs/ defaultconfigs/ scripts/ *.txt *.json  ->  <dir>/.conduit/rollback-<ts>.tar.zst
-   (world, libraries, backups excluded — rollback archive stays in the hundreds of MB)
-3. download + unzip new pack into a temp dir
-4. rm mods/, overlay new mods/ config/ etc onto <dir>
-5. preserve server.properties, ops.json, whitelist.json, user_jvm_args.txt
-6. start; if it fails to reach RCON in 5 min, auto-rollback from the archive
+1. stop the instance
+2. cold zip of the world -> backups/conduit-<ts>-<version>.zip, recorded on the version
+   being left  (cold because the server is down; the mod's own command is for a running
+   server and is what the backups tab uses)
+3. zip the version-owned set -> ~/.conduit/versions/<instance>/v<id>.zip
+4. rm mods/, overlay the pack; server.properties, ops.json, whitelist.json, banned-*.json,
+   usercache.json, eula.txt and user_jvm_args.txt are preserved
+   run.sh is NOT preserved: the pack pins the java path, and the archive holds the old one
+5. record the new version, start, wait up to 15 min for the Done line in latest.log
+6. if it exits or never finishes booting, the archive goes straight back and the server
+   is started again on the old version
 ```
 
-Keep the last 2 rollback archives per instance.
+The versions table is append only, so going back adds a row rather than rewriting
+history. A revert shares the archive of the row it came from; the file is deleted only
+when no row points at it. The newest three archives per instance are kept.
+
+Backups are tagged with the version that was running when they were taken, by the
+recorded name first and the clock second. Restoring a world into different mods than it
+grew up in is the failure that tag exists to prevent, and going back offers the matching
+world restore in the same confirmation.
 
 ## CurseForge
 
@@ -198,8 +221,13 @@ PATCH  /v1/instances/:name                  port, rcon, memory, backup glob
 DELETE /v1/instances/:name                  unregister (files untouched unless ?purge)
 
 POST   /v1/instances/:name/start|stop|restart   -> job
-POST   /v1/instances/:name/update           { fileId } -> job
-POST   /v1/instances/:name/rollback         -> job
+POST   /v1/artifacts                        pack zip: upload or { path } on the box
+GET    /v1/artifacts                        DELETE /v1/artifacts/:sha
+GET    /v1/instances/:name/versions         history, active version, run in flight
+POST   /v1/instances/:name/upgrade          { artifact, label } -> 202 run
+GET    /v1/instances/:name/upgrade/status   the run, polled while it works
+POST   /v1/instances/:name/versions/:id/revert  { restore_world } -> 202 run
+DELETE /v1/instances/:name/versions/:id/snapshot  free the archive
 
 GET    /v1/instances/:name/logs?tail=200
 WS     /v1/instances/:name/console          log stream down, RCON commands up
@@ -238,7 +266,7 @@ conduit/
     pm2/          jlist, start, stop, logs
     rcon/
     curseforge/   client + pack resolution
-    update/       update + rollback
+    upgrade/      artifact cache, pack probe, snapshot, apply, restore
     backups/
     jobs/         in-memory queue, one worker per instance
   web/            bun + vite + react + ts + tailwind, vite-plugin-pwa
@@ -266,7 +294,7 @@ no `tailwind.config.js`. TanStack Query for REST, raw WebSocket for console and 
 No component library. Console needs `@tanstack/react-virtual` — modpack servers emit
 thousands of log lines.
 
-Screens: instance list → instance detail (console, properties, backups, update), plus
+Screens: instance list → instance detail (logs, console, backups, upgrades), plus
 settings. Three screens total. Every call is same origin.
 
 ## Deferred

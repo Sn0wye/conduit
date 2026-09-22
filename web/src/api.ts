@@ -63,6 +63,73 @@ export type Backup = {
   world?: string;
   preview?: string;
   from_manifest: boolean;
+  // The pack version the server was running when this was taken. Restoring a
+  // world into different mods than it grew up in is the mistake this prevents.
+  version?: string;
+};
+
+// Layout is what the agent found inside a pack zip. It is shown before the
+// upgrade runs, because "0 mods" on screen is cheaper than a failed boot.
+export type Layout = {
+  root: string;
+  label: string;
+  mods: number;
+  files: number;
+  has_run_sh: boolean;
+  has_server_jar: boolean;
+  unpacked_bytes: number;
+};
+
+export type Artifact = {
+  sha256: string;
+  name: string;
+  size: number;
+  added: string;
+  layout: Layout;
+};
+
+// A version is one state of the server files. snapshot_bytes of 0 means the
+// archive was pruned and the version can no longer be returned to.
+export type Version = {
+  id: number;
+  instance: string;
+  label: string;
+  source: "baseline" | "upload" | "revert";
+  artifact?: string;
+  artifact_name?: string;
+  snapshot_bytes: number;
+  world_backup?: string;
+  applied_at: string;
+  state: "active" | "superseded" | "rolled_back" | "failed";
+  revert_of?: number;
+  note?: string;
+};
+
+export type Step = {
+  name: string;
+  state: "pending" | "running" | "done" | "skipped" | "failed";
+  detail?: string;
+  ended?: string;
+};
+
+// An upgrade outlives the request that asked for it, so the page polls this
+// instead of waiting on a response for ten minutes.
+export type Run = {
+  instance: string;
+  kind: "upgrade" | "revert";
+  label: string;
+  steps: Step[];
+  started: string;
+  ended?: string;
+  done: boolean;
+  error?: string;
+  version_id?: number;
+};
+
+export type VersionList = {
+  versions: Version[];
+  active?: Version;
+  run: Run | null;
 };
 
 // A rollback is a world Conduit moved aside before a restore replaced it.
@@ -157,6 +224,54 @@ export const api = {
     ),
   deleteRollback: (name: string, dir: string) =>
     call<void>(`/v1/instances/${name}/rollbacks/${encodeURIComponent(dir)}`, { method: "DELETE" }),
+  artifacts: () => call<Artifact[]>("/v1/artifacts"),
+  // The zip is streamed straight through, so a two gigabyte pack is never held
+  // in memory on either side. fetch sets its own multipart boundary, which is
+  // why the Content-Type header from call() is not wanted here.
+  uploadArtifact: async (file: File, onProgress?: (fraction: number) => void) => {
+    const body = new FormData();
+    body.append("file", file);
+    return await new Promise<Artifact>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/v1/artifacts");
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(JSON.parse(xhr.responseText) as Artifact);
+          return;
+        }
+        let msg = xhr.responseText;
+        try {
+          msg = JSON.parse(xhr.responseText).error?.message ?? msg;
+        } catch {
+          /* the body was not JSON, show it raw */
+        }
+        reject(new Error(msg || xhr.statusText));
+      };
+      xhr.onerror = () => reject(new Error("the upload was cut off"));
+      xhr.send(body);
+    });
+  },
+  // The same pack already on the box: no second copy over the wire.
+  addArtifactPath: (path: string) =>
+    call<Artifact>("/v1/artifacts", { method: "POST", body: JSON.stringify({ path }) }),
+  deleteArtifact: (sha: string) => call<void>(`/v1/artifacts/${sha}`, { method: "DELETE" }),
+  versions: (name: string) => call<VersionList>(`/v1/instances/${name}/versions`),
+  upgrade: (name: string, artifact: string, label: string) =>
+    call<Run>(`/v1/instances/${name}/upgrade`, {
+      method: "POST",
+      body: JSON.stringify({ artifact, label }),
+    }),
+  upgradeStatus: (name: string) => call<Run | null>(`/v1/instances/${name}/upgrade/status`),
+  revert: (name: string, id: number, restoreWorld: boolean) =>
+    call<Run>(`/v1/instances/${name}/versions/${id}/revert`, {
+      method: "POST",
+      body: JSON.stringify({ restore_world: restoreWorld }),
+    }),
+  dropSnapshot: (name: string, id: number) =>
+    call<void>(`/v1/instances/${name}/versions/${id}/snapshot`, { method: "DELETE" }),
   settings: () => call<Settings>("/v1/settings"),
   saveSettings: (body: SettingsPatch) =>
     call<Settings>("/v1/settings", { method: "PATCH", body: JSON.stringify(body) }),

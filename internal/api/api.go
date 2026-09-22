@@ -20,6 +20,7 @@ import (
 	"github.com/snowye/conduit/internal/rcon"
 	"github.com/snowye/conduit/internal/settings"
 	"github.com/snowye/conduit/internal/store"
+	"github.com/snowye/conduit/internal/upgrade"
 )
 
 // Server drives the one machine it runs on. There is no fan-out and no peer
@@ -46,11 +47,19 @@ type Server struct {
 	// here dials on its own.
 	rconMu sync.Mutex
 	rcons  map[string]*rcon.Session
+
+	// runs holds the last upgrade or revert of each instance, live while it
+	// happens and readable afterwards. It is in memory on purpose: the
+	// durable record of what was applied is the versions table, and a run is
+	// only the progress list of one screen.
+	runMu sync.Mutex
+	runs  map[string]*run
 }
 
 func New(db *store.DB, set settings.Settings) *Server {
 	return &Server{db: db, set: set, pm: pm2.New(set.PM2Bin, set.NodeBinDir),
-		busy: map[string]string{}, rcons: map[string]*rcon.Session{}}
+		busy: map[string]string{}, rcons: map[string]*rcon.Session{},
+		runs: map[string]*run{}}
 }
 
 // errBusy is returned as 409 rather than queued. Waiting silently behind
@@ -123,6 +132,8 @@ func handle(fn func(http.ResponseWriter, *http.Request) error) http.HandlerFunc 
 				fail(w, http.StatusNotFound, "not_found", err)
 			case errors.Is(err, backups.ErrBadName):
 				fail(w, http.StatusBadRequest, "bad_request", err)
+			case errors.Is(err, upgrade.ErrBadArtifact):
+				fail(w, http.StatusBadRequest, "bad_artifact", err)
 			default:
 				fail(w, http.StatusInternalServerError, "internal", err)
 			}
@@ -154,6 +165,14 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("DELETE /v1/instances/{name}/rollbacks/{dir}", handle(s.deleteRollback))
 	mux.HandleFunc("POST /v1/instances/{name}/backups", handle(s.createBackup))
 	mux.HandleFunc("POST /v1/instances/{name}/backups/{file}/restore", handle(s.restoreBackup))
+	mux.HandleFunc("POST /v1/artifacts", handle(s.putArtifact))
+	mux.HandleFunc("GET /v1/artifacts", handle(s.listArtifacts))
+	mux.HandleFunc("DELETE /v1/artifacts/{sha}", handle(s.deleteArtifact))
+	mux.HandleFunc("GET /v1/instances/{name}/versions", handle(s.listVersions))
+	mux.HandleFunc("POST /v1/instances/{name}/upgrade", handle(s.startUpgrade))
+	mux.HandleFunc("GET /v1/instances/{name}/upgrade/status", handle(s.upgradeStatus))
+	mux.HandleFunc("POST /v1/instances/{name}/versions/{id}/revert", handle(s.startRevert))
+	mux.HandleFunc("DELETE /v1/instances/{name}/versions/{id}/snapshot", handle(s.dropSnapshot))
 	mux.HandleFunc("GET /v1/settings", handle(s.getSettings))
 	mux.HandleFunc("PATCH /v1/settings", handle(s.patchSettings))
 	return mux

@@ -257,8 +257,40 @@ func (s *Server) listBackups(w http.ResponseWriter, r *http.Request) error {
 		}
 		return err
 	}
+	if versions, err := s.db.ListVersions(r.Context(), inst.Name); err == nil {
+		tagVersions(list, versions)
+	}
 	writeJSON(w, 200, list)
 	return nil
+}
+
+// tagVersions says which pack version each backup came from. A world restored
+// into the wrong version of the mods is the failure this is here to prevent,
+// so the answer has to be visible next to every backup in the list.
+//
+// A version names the backup taken as it was being left, and that mapping is
+// exact. Everything else falls back to the clock: versions arrive newest
+// first, so the first one applied before a backup was written is the one that
+// was running when it was taken.
+func tagVersions(list []backups.Backup, versions []store.Version) {
+	byFile := map[string]string{}
+	for _, v := range versions {
+		if v.WorldBackup != "" {
+			byFile[v.WorldBackup] = v.Label
+		}
+	}
+	for i := range list {
+		if label, ok := byFile[list[i].File]; ok {
+			list[i].Version = label
+			continue
+		}
+		for _, v := range versions {
+			if v.AppliedAt.Before(list[i].Created) {
+				list[i].Version = v.Label
+				break
+			}
+		}
+	}
 }
 
 // createBackup asks the server's own backup mod to take one. Conduit does not

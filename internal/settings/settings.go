@@ -144,8 +144,13 @@ func TsnetDir() string    { return filepath.Join(StateDir(), "tsnet") }
 func ArtifactDir() string { return filepath.Join(StateDir(), "artifacts") }
 func JobLogDir() string   { return filepath.Join(StateDir(), "jobs") }
 
+// VersionDir holds the snapshot of each version's server files. It lives here
+// rather than inside the instance so an upgrade never grows the directory it
+// is about to archive, and so a snapshot survives a purge of the instance.
+func VersionDir() string { return filepath.Join(StateDir(), "versions") }
+
 func EnsureDirs() error {
-	for _, d := range []string{StateDir(), ArtifactDir(), JobLogDir()} {
+	for _, d := range []string{StateDir(), ArtifactDir(), JobLogDir(), VersionDir()} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return err
 		}

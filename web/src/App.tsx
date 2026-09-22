@@ -10,6 +10,8 @@ import {
   type Rollback,
   type SettingsPatch,
 } from "./api";
+import { Problem, Spinner } from "./ui";
+import { Upgrades } from "./Upgrades";
 
 type Screen = { view: "list" } | { view: "detail"; name: string } | { view: "settings" };
 
@@ -131,7 +133,7 @@ function Detail({ name, onBack }: { name: string; onBack: () => void }) {
   // The log tab is the default on purpose. Opening the console opens an RCON
   // connection, and nothing should open one just because a screen was looked
   // at.
-  const [tab, setTab] = useState<"logs" | "console" | "backups">("logs");
+  const [tab, setTab] = useState<"logs" | "console" | "backups" | "upgrades">("logs");
 
   // The backup watch lives here rather than in the tab, so switching to the
   // console while the mod zips does not throw the wait away.
@@ -220,7 +222,7 @@ function Detail({ name, onBack }: { name: string; onBack: () => void }) {
       {err && <Problem error={err} />}
 
       <div className="flex gap-4 border-b border-edge px-4">
-        {(["logs", "console", "backups"] as const).map((t) => (
+        {(["logs", "console", "backups", "upgrades"] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -243,6 +245,8 @@ function Detail({ name, onBack }: { name: string; onBack: () => void }) {
           <LogPane name={name} />
         ) : tab === "console" ? (
           <Console name={name} inst={inst} online={online} />
+        ) : tab === "upgrades" ? (
+          <Upgrades name={name} online={online} freeBytes={disk?.free_bytes} />
         ) : (
           <Backups
             name={name}
@@ -632,12 +636,6 @@ function Backups({
   );
 }
 
-function Spinner() {
-  return (
-    <span className="size-3 shrink-0 animate-spin rounded-full border border-mute border-t-transparent" />
-  );
-}
-
 // PendingRow stands in for the file the mod has not finished writing, so the
 // list shows the backup arriving instead of sitting unchanged for a minute.
 function PendingRow() {
@@ -995,10 +993,3 @@ function Field({
   );
 }
 
-function Problem({ error }: { error: unknown }) {
-  return (
-    <p className="mx-4 my-3 rounded border border-bad/40 bg-bad/10 px-3 py-2 text-xs text-bad">
-      {error instanceof Error ? error.message : String(error)}
-    </p>
-  );
-}
