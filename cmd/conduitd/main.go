@@ -30,15 +30,16 @@ func main() {
 		claim   = flag.String("claim", "", "reset the owning tailnet login and exit")
 		dev     = flag.Bool("dev", false, "serve plain http on localhost and skip tailnet identity")
 		devAddr = flag.String("dev-addr", "127.0.0.1:8420", "listen address in dev mode")
+		host    = flag.String("host-port", "", "serve on this port of the machine's own tailnet address, using the tailscaled already running here instead of joining as a second node")
 	)
 	flag.Parse()
 
-	if err := run(*authKey, *claim, *dev, *devAddr); err != nil {
+	if err := run(*authKey, *claim, *dev, *devAddr, *host); err != nil {
 		log.Fatalf("conduitd: %v", err)
 	}
 }
 
-func run(authKey, claim string, dev bool, devAddr string) error {
+func run(authKey, claim string, dev bool, devAddr, hostPort string) error {
 	if err := settings.EnsureDirs(); err != nil {
 		return err
 	}
@@ -87,6 +88,28 @@ func run(authKey, claim string, dev bool, devAddr string) error {
 		return serve(ctx, &http.Server{Addr: devAddr, Handler: mux}, nil)
 	}
 
+	// Host mode: no node of its own, no cert, no login URL. The panel answers
+	// on the address the machine already has, and the tailnet ACL is the
+	// boundary exactly as it is in tsnet mode.
+	if hostPort != "" {
+		hn, err := tsnetsrv.DialHost(ctx)
+		if err != nil {
+			return err
+		}
+		mux.Handle("/v1/", api.Auth(hn.WhoIs, db)(apiSrv.Routes()))
+
+		ln, err := hn.ListenTailnet(ctx, hostPort)
+		if err != nil {
+			return err
+		}
+		addr := ln.Addr().String()
+		if fqdn, err := hn.FQDN(ctx); err == nil {
+			log.Printf("serving http://%s:%s", fqdn, hostPort)
+		}
+		log.Printf("serving http://%s", addr)
+		return serve(ctx, &http.Server{Handler: mux}, ln)
+	}
+
 	ts, err := tsnetsrv.Start(ctx, settings.NodeName(), settings.TsnetDir(), authKey)
 	if err != nil {
 		return err
@@ -102,7 +125,22 @@ func run(authKey, claim string, dev bool, devAddr string) error {
 
 	ln, err := ts.ListenTLS(":443")
 	if err != nil {
-		return fmt.Errorf("listen tls (enable MagicDNS and HTTPS Certificates in the tailnet admin): %w", err)
+		// A tailnet with HTTPS Certificates switched off cannot issue the cert,
+		// and that is an admin-console setting no binary can flip for itself.
+		// Fall back to plain http on the same node rather than refusing to
+		// start: the hop is still WireGuard-encrypted and WhoIs still names the
+		// caller, so the auth story is unchanged. What is lost is the secure
+		// context, and with it the service worker, so the PWA will not install
+		// until certificates are turned on and conduitd is restarted.
+		log.Printf("no https (%v)", err)
+		log.Printf("falling back to plain http; enable HTTPS Certificates in the tailnet admin, then restart, to install the PWA")
+
+		plain, plainErr := ts.Listen(":80")
+		if plainErr != nil {
+			return fmt.Errorf("listen tls: %w (and plain http: %v)", err, plainErr)
+		}
+		log.Printf("serving http://%s", fqdn)
+		return serve(ctx, &http.Server{Handler: mux}, plain)
 	}
 	if redir, err := ts.Listen(":80"); err == nil {
 		go http.Serve(redir, tsnetsrv.RedirectToHTTPS())
