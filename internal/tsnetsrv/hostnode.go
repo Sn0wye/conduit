@@ -61,6 +61,19 @@ func (h *HostNode) FQDN(ctx context.Context) (string, error) {
 	return strings.TrimSuffix(st.Self.DNSName, "."), nil
 }
 
+// IPs are all of the machine's tailnet addresses.
+func (h *HostNode) IPs(ctx context.Context) []string {
+	st, err := h.lc.StatusWithoutPeers(ctx)
+	if err != nil || st.Self == nil {
+		return nil
+	}
+	out := make([]string, 0, len(st.Self.TailscaleIPs))
+	for _, ip := range st.Self.TailscaleIPs {
+		out = append(out, ip.String())
+	}
+	return out
+}
+
 // TailnetAddr is the machine's tailnet IP. Binding to it rather than to
 // 0.0.0.0 is what keeps the panel off the LAN and the public internet, so the
 // tailnet ACL stays the only way in.

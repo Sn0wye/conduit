@@ -24,6 +24,9 @@ import (
 	webui "github.com/snowye/conduit/web"
 )
 
+// version is stamped by the release build with -ldflags "-X main.version=v1.2.3".
+var version = "dev"
+
 func main() {
 	var (
 		authKey = flag.String("authkey", os.Getenv("TS_AUTHKEY"), "tailscale auth key, optional; without it the first run prints a login URL")
@@ -33,10 +36,18 @@ func main() {
 		dev     = flag.Bool("dev", false, "serve plain http on localhost and skip tailnet identity")
 		devAddr = flag.String("dev-addr", "127.0.0.1:8420", "listen address in dev mode")
 		host    = flag.String("host-port", "", "serve on this port of the machine's own tailnet address, using the tailscaled already running here instead of joining as a second node")
+		showVer = flag.Bool("version", false, "print the version and exit")
 	)
 	flag.Parse()
 
-	if err := run(*authKey, *claim, *allow, *revoke, *dev, *devAddr, *host); err != nil {
+	if *showVer || flag.Arg(0) == "version" {
+		fmt.Println("conduitd", version)
+		return
+	}
+
+	// A stop signal while still waiting for the tailnet login cancels Up; that
+	// is a clean shutdown, not a failure worth a fatal line in the journal.
+	if err := run(*authKey, *claim, *allow, *revoke, *dev, *devAddr, *host); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatalf("conduitd: %v", err)
 	}
 }
@@ -93,6 +104,7 @@ func run(authKey, claim, allow, revoke string, dev bool, devAddr, hostPort strin
 	if err != nil {
 		return err
 	}
+	api.Version = version
 	apiSrv := api.New(db, set)
 	apiSrv.WarmDisk(ctx)
 	go apiSrv.ReapRCON(ctx)
@@ -105,7 +117,7 @@ func run(authKey, claim, allow, revoke string, dev bool, devAddr, hostPort strin
 	} else {
 		log.Printf("pm2 at %s", set.PM2Bin)
 	}
-	log.Printf("servers root %s", set.ServersRoot)
+	log.Printf("conduitd %s, servers root %s", version, set.ServersRoot)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", webui.Handler())
@@ -132,11 +144,12 @@ func run(authKey, claim, allow, revoke string, dev bool, devAddr, hostPort strin
 			return err
 		}
 		addr := ln.Addr().String()
-		if fqdn, err := hn.FQDN(ctx); err == nil {
+		fqdn, err := hn.FQDN(ctx)
+		if err == nil {
 			log.Printf("serving http://%s:%s", fqdn, hostPort)
 		}
 		log.Printf("serving http://%s", addr)
-		return serve(ctx, &http.Server{Handler: mux}, ln)
+		return serve(ctx, &http.Server{Handler: api.Guard(api.Names(fqdn, hn.IPs(ctx)...), mux)}, ln)
 	}
 
 	ts, err := tsnetsrv.Start(ctx, settings.NodeName(), settings.TsnetDir(), authKey)
@@ -151,6 +164,7 @@ func run(authKey, claim, allow, revoke string, dev bool, devAddr, hostPort strin
 	}
 	// The PWA and the API share this origin, so no CORS middleware is needed.
 	mux.Handle("/v1/", api.Auth(ts.WhoIs, db)(apiSrv.Routes()))
+	guarded := api.Guard(api.Names(fqdn, ts.IPs()...), mux)
 
 	ln, err := ts.ListenTLS(":443")
 	if err != nil {
@@ -169,17 +183,20 @@ func run(authKey, claim, allow, revoke string, dev bool, devAddr, hostPort strin
 			return fmt.Errorf("listen tls: %w (and plain http: %v)", err, plainErr)
 		}
 		log.Printf("serving http://%s", fqdn)
-		return serve(ctx, &http.Server{Handler: mux}, plain)
+		return serve(ctx, &http.Server{Handler: guarded}, plain)
 	}
 	if redir, err := ts.Listen(":80"); err == nil {
 		go http.Serve(redir, tsnetsrv.RedirectToHTTPS())
 	}
 
 	log.Printf("serving https://%s", fqdn)
-	return serve(ctx, &http.Server{Handler: mux}, ln)
+	return serve(ctx, &http.Server{Handler: guarded}, ln)
 }
 
 func serve(ctx context.Context, srv *http.Server, ln net.Listener) error {
+	// Headers that never finish arriving should not hold a connection open
+	// forever. Bodies are left unbounded: pack uploads take minutes.
+	srv.ReadHeaderTimeout = 10 * time.Second
 	errc := make(chan error, 1)
 	go func() {
 		if ln != nil {
