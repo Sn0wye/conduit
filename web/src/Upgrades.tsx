@@ -1,21 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, bytes, since, type Artifact, type Run, type Step, type Version } from "./api";
-import { Problem, Spinner } from "./ui";
+import { Button, Hint, Label, Notice, Problem, Section, Sheet, Spinner, Window } from "./ui";
 
-// The upgrades tab is one question asked twice: which files should this server
+// The versions tab is one question asked twice: which files should this server
 // be running, and how do I get back. Everything on screen is either a pack
 // waiting to be applied or a version that can be returned to.
 
-export function Upgrades({
-  name,
-  online,
-  freeBytes,
-}: {
-  name: string;
-  online: boolean;
-  freeBytes?: number;
-}) {
+export function fmtDate(iso: string): string {
+  const d = new Date(iso);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+export function Upgrades({ name, online, freeBytes }: { name: string; online: boolean; freeBytes?: number }) {
   const qc = useQueryClient();
   const [staged, setStaged] = useState<Artifact | null>(null);
   const [label, setLabel] = useState("");
@@ -25,13 +23,13 @@ export function Upgrades({
     queryFn: () => api.versions(name),
     // A run is minutes of work with no other way to see it, so the list polls
     // itself while one is in flight and sits still the rest of the time.
-    refetchInterval: (q) => (q.state.data?.run && !q.state.data.run.done ? 2000 : false),
+    refetchInterval: (q) => (q.state.data?.run && !q.state.data.run.done ? 1500 : false),
   });
   const run = versions.data?.run ?? null;
   const running = !!run && !run.done;
 
   // The rest of the app is looking at the same server, so a finished run has
-  // to refresh the status, the backup list and the version on the dashboard.
+  // to refresh the status, the backup list and the version in the header.
   const wasRunning = useRef(false);
   useEffect(() => {
     if (wasRunning.current && !running) {
@@ -51,19 +49,40 @@ export function Upgrades({
   });
 
   const [confirming, setConfirming] = useState<Artifact | null>(null);
+  const active = versions.data?.active;
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto p-4">
-      <Current v={versions.data?.active} online={online} />
+    <div className="scroll-quiet min-h-0 flex-1 overflow-y-auto">
+      <div className="grid grid-cols-2 border-b border-edge">
+        <div className="border-r border-edge px-4 py-3 sm:px-6">
+          <Label>files in use</Label>
+          <div className="mt-1 truncate font-mono text-[14px]">{active?.label ?? "not recorded yet"}</div>
+        </div>
+        <div className="px-4 py-3 sm:px-6">
+          <Label>can come back to it</Label>
+          <div className="mt-1 truncate font-mono text-[14px]">
+            {!active
+              ? "after the first upgrade"
+              : active.snapshot_bytes > 0
+                ? `yes, ${bytes(active.snapshot_bytes)}`
+                : "archived on next upgrade"}
+          </div>
+        </div>
+      </div>
 
-      {running ? (
-        <RunPane run={run!} />
-      ) : (
+      {run && (
+        <div className="border-b border-edge p-3 sm:p-6">
+          <RunWindow run={run} name={name} />
+        </div>
+      )}
+
+      {!running && (
         <PackPicker
           name={name}
           staged={staged}
           label={label}
           freeBytes={freeBytes}
+          online={online}
           onStaged={(a) => {
             setStaged(a);
             setLabel(a.layout.label || a.name.replace(/\.zip$/i, ""));
@@ -72,17 +91,10 @@ export function Upgrades({
           onGo={() => staged && setConfirming(staged)}
         />
       )}
-
-      {start.error && <Problem error={start.error} />}
-      {run?.done && run.error && (
-        <p className="my-3 rounded border border-bad/40 bg-bad/10 px-3 py-2 text-xs text-bad">
-          the {run.kind} failed: {run.error}
-        </p>
-      )}
-      {run?.done && !run.error && (
-        <p className="my-3 rounded border border-live/40 bg-live/10 px-3 py-2 text-xs text-live">
-          {run.kind === "upgrade" ? "upgraded to" : "back on"} {run.label}, the server booted
-        </p>
+      {start.error && (
+        <div className="px-4 sm:px-6">
+          <Problem error={start.error} />
+        </div>
       )}
 
       <History name={name} versions={versions.data?.versions ?? []} busy={running} />
@@ -104,23 +116,75 @@ export function Upgrades({
   );
 }
 
-function Current({ v, online }: { v?: Version; online: boolean }) {
+// RunWindow shows an upgrade the way a script would print it, because that is
+// what it is: steps minutes apart, each one either done or not.
+function RunWindow({ run, name }: { run: Run; name: string }) {
+  const cmd = `conduit ${run.kind} ${name} --to "${run.label}"`;
   return (
-    <section className="mb-5 rounded border border-edge bg-panel p-3">
-      <div className="text-[11px] text-faint">running these server files</div>
-      <div className="mt-1 flex items-baseline gap-2">
-        <span className="text-sm text-ink">{v?.label ?? "never upgraded through conduit"}</span>
-        {v && <span className="text-[11px] text-faint">· applied {since(v.applied_at)} ago</span>}
+    <Window
+      title={`${name} — ${run.kind}`}
+      right={
+        run.done ? (
+          <span className={`font-mono text-[10.5px] ${run.error ? "text-bad" : "text-live"}`}>
+            {run.error ? "failed" : "done"}
+          </span>
+        ) : (
+          <span className="font-mono text-[10.5px] text-faint">
+            <Spinner /> running
+          </span>
+        )
+      }
+    >
+      <div className="px-4 py-3 font-mono text-[11.5px] leading-[1.9]">
+        <div className="text-ink">
+          <span className="text-accent">$</span> {cmd}
+        </div>
+        {run.steps.map((s, i) => (
+          <StepLine key={i} s={s} />
+        ))}
+        {run.done ? (
+          <div className={`mt-1 ${run.error ? "text-bad" : "text-live"}`}>
+            {run.error
+              ? `✗ ${run.error}`
+              : `✓ ${run.kind === "upgrade" ? "upgraded to" : "back on"} ${run.label}, the server booted`}
+          </div>
+        ) : (
+          <div className="mt-1 text-faint"># safe to close this page, the run keeps going</div>
+        )}
       </div>
-      <div className="mt-1 text-[11px] text-faint">
-        {!v
-          ? "the first upgrade records whatever is in the directory now, so there is something to go back to"
-          : v.snapshot_bytes > 0
-            ? `${bytes(v.snapshot_bytes)} archived, this version can be returned to`
-            : "archived when the next upgrade runs"}
-        {online && " · the server is up, an upgrade stops it first"}
-      </div>
-    </section>
+    </Window>
+  );
+}
+
+function StepLine({ s }: { s: Step }) {
+  const mark =
+    s.state === "running" ? (
+      <Spinner className="text-accent" />
+    ) : s.state === "done" ? (
+      "✓"
+    ) : s.state === "failed" ? (
+      "✗"
+    ) : s.state === "skipped" ? (
+      "–"
+    ) : (
+      "·"
+    );
+  const tone =
+    s.state === "done"
+      ? "text-mute"
+      : s.state === "running"
+        ? "text-ink"
+        : s.state === "failed"
+          ? "text-bad"
+          : "text-faint/60";
+  return (
+    <div className={`flex gap-[1ch] ${tone}`}>
+      <span className={`w-[1ch] shrink-0 ${s.state === "done" ? "text-live" : ""}`}>{mark}</span>
+      <span>
+        {s.name}
+        {s.detail && <span className="text-faint"> {s.detail}</span>}
+      </span>
+    </div>
   );
 }
 
@@ -132,6 +196,7 @@ function PackPicker({
   staged,
   label,
   freeBytes,
+  online,
   onStaged,
   onLabel,
   onGo,
@@ -140,6 +205,7 @@ function PackPicker({
   staged: Artifact | null;
   label: string;
   freeBytes?: number;
+  online: boolean;
   onStaged: (a: Artifact) => void;
   onLabel: (v: string) => void;
   onGo: () => void;
@@ -166,10 +232,8 @@ function PackPicker({
   const tight = !!(freeBytes && staged && freeBytes < staged.layout.unpacked_bytes * 2);
 
   return (
-    <section className="mb-6">
-      <h2 className="mb-2 text-xs text-mute">upgrade to a new pack</h2>
-
-      <div className="flex flex-wrap items-center gap-2">
+    <Section title="Upgrade to a new pack" aside={online ? <Label>stops the server first</Label> : undefined}>
+      <div className="flex flex-wrap items-center gap-2 px-4 py-4 sm:px-6">
         <input
           ref={fileInput}
           type="file"
@@ -181,153 +245,126 @@ function PackPicker({
             e.target.value = "";
           }}
         />
-        <button
-          onClick={() => fileInput.current?.click()}
-          disabled={upload.isPending}
-          className="flex items-center gap-2 rounded bg-panel px-3 py-1.5 text-sm text-ink disabled:opacity-30"
+        <Button onClick={() => fileInput.current?.click()} disabled={upload.isPending} busy={upload.isPending}>
+          {upload.isPending ? "Uploading" : "Upload a zip"}
+        </Button>
+        <Label className="px-1">or</Label>
+        <form
+          className="flex min-w-[16rem] flex-1 gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (path.trim()) fromPath.mutate();
+          }}
         >
-          {upload.isPending && <Spinner />}
-          {upload.isPending ? "uploading" : "choose a zip"}
-        </button>
-        <span className="text-[11px] text-faint">or a path on the server</span>
-        <input
-          value={path}
-          onChange={(e) => setPath(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && path.trim() && fromPath.mutate()}
-          placeholder="~/packs/atm10-1.3.0-server.zip"
-          className="min-w-0 flex-1 rounded border border-edge bg-bg px-2 py-1.5 text-xs text-ink placeholder:text-faint"
-        />
-        <button
-          onClick={() => fromPath.mutate()}
-          disabled={!path.trim() || fromPath.isPending}
-          className="flex items-center gap-2 rounded bg-panel px-3 py-1.5 text-xs text-ink disabled:opacity-30"
-        >
-          {fromPath.isPending && <Spinner />}
-          read it
-        </button>
+          <label className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded border border-edge bg-term px-2.5 focus-within:border-edge-strong">
+            <span className="font-mono text-[12px] text-accent">$</span>
+            <input
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+              aria-label="Path to a pack zip on the server"
+              spellCheck={false}
+              autoCapitalize="off"
+              placeholder="~/packs/atm10-1.3.1-server.zip"
+              className="min-w-0 flex-1 bg-transparent font-mono text-[12px] outline-none placeholder:text-faint"
+            />
+          </label>
+          <Button disabled={!path.trim() || fromPath.isPending} busy={fromPath.isPending}>
+            Read
+          </Button>
+        </form>
       </div>
 
       {progress !== null && (
-        <div className="mt-2 h-1 w-full overflow-hidden rounded bg-edge">
-          <div className="h-full bg-live transition-all" style={{ width: `${progress * 100}%` }} />
+        <div className="mx-4 mb-4 h-px bg-edge sm:mx-6">
+          <div className="h-px bg-accent transition-all" style={{ width: `${progress * 100}%` }} />
         </div>
       )}
-      {upload.error && <Problem error={upload.error} />}
-      {fromPath.error && <Problem error={fromPath.error} />}
+      {(upload.error || fromPath.error) && (
+        <div className="px-4 sm:px-6">
+          {upload.error && <Problem error={upload.error} />}
+          {fromPath.error && <Problem error={fromPath.error} />}
+        </div>
+      )}
 
       {staged && (
-        <div className="mt-3 rounded border border-live/40 bg-panel p-3">
-          <div className="truncate text-sm text-ink">{staged.name}</div>
-          <div className="mt-1 text-[11px] text-faint">
-            {staged.layout.mods} mods · {staged.layout.files} files ·{" "}
-            {bytes(staged.layout.unpacked_bytes)} unpacked
-            {staged.layout.root && ` · inside ${staged.layout.root}/`}
-            {!staged.layout.has_run_sh && " · no run.sh, the current one is kept"}
+        <div className="border-t border-edge">
+          <div className="truncate px-4 pt-4 font-mono text-[13px] sm:px-6">{staged.name}</div>
+          <dl className="mx-4 mt-3 grid grid-cols-3 border border-edge sm:mx-6">
+            {[
+              ["mods", String(staged.layout.mods)],
+              ["files", String(staged.layout.files)],
+              ["unpacked", bytes(staged.layout.unpacked_bytes)],
+            ].map(([l, v], i) => (
+              <div key={l} className={`px-3 py-2 ${i < 2 ? "border-r border-edge" : ""}`}>
+                <dt>
+                  <Label>{l}</Label>
+                </dt>
+                <dd className="font-mono text-[14px]">{v}</dd>
+              </div>
+            ))}
+          </dl>
+          <div className="px-4 sm:px-6">
+            {!staged.layout.has_run_sh && <Notice>No run.sh in the pack, so the current one is kept.</Notice>}
+            {staged.layout.root && <Notice>The pack sits inside {staged.layout.root}/; that folder is unwrapped.</Notice>}
+            {tight && (
+              <Notice tone="warn">
+                Only {bytes(freeBytes!)} free. The upgrade also writes a world backup and an archive of
+                the current files.
+              </Notice>
+            )}
           </div>
-          {tight && (
-            <p className="mt-2 rounded border border-warn/40 bg-warn/10 px-2 py-1 text-[11px] text-warn">
-              only {bytes(freeBytes!)} free. the upgrade also writes a world backup and an archive
-              of the current files.
-            </p>
-          )}
-          <div className="mt-3 flex items-center gap-2">
+          <form
+            className="flex items-center gap-2 px-4 py-4 sm:px-6"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (label.trim()) onGo();
+            }}
+          >
             <input
               value={label}
               onChange={(e) => onLabel(e.target.value)}
+              aria-label="Version name"
               placeholder="what to call this version"
-              className="min-w-0 flex-1 rounded border border-edge bg-bg px-2 py-1.5 text-xs text-ink placeholder:text-faint"
+              className="h-8 min-w-0 flex-1 rounded border border-edge bg-term px-2.5 font-mono text-[12px] outline-none placeholder:text-faint focus:border-edge-strong"
             />
-            <button
-              onClick={onGo}
-              disabled={!label.trim()}
-              className="rounded bg-live/15 px-3 py-1.5 text-sm text-live disabled:opacity-30"
-            >
-              upgrade
-            </button>
-          </div>
+            <Button variant="primary" disabled={!label.trim()}>
+              Upgrade
+            </Button>
+          </form>
         </div>
       )}
 
       {others.length > 0 && (
-        <details className="mt-3">
-          <summary className="cursor-pointer text-[11px] text-faint">
-            {others.length} pack{others.length === 1 ? "" : "s"} already on the box
+        <details className="group border-t border-edge">
+          <summary className="flex h-10 cursor-pointer list-none items-center px-4 font-mono text-[10.5px] text-faint hover:text-mute sm:px-6">
+            <span className="mr-2 inline-block transition-transform group-open:rotate-90">›</span>
+            {others.length} pack{others.length === 1 ? "" : "s"} already on this machine
           </summary>
-          <ul className="mt-2 space-y-1">
+          <ul className="border-t border-edge">
             {others.map((a) => (
-              <li key={a.sha256} className="flex items-center gap-3 rounded border border-edge px-2 py-1.5">
-                <span className="min-w-0 flex-1 truncate text-xs text-mute">{a.name}</span>
-                <span className="shrink-0 text-[11px] text-faint">
-                  {a.layout.mods} mods · {bytes(a.size)}
-                </span>
-                <button
-                  onClick={() => onStaged(a)}
-                  className="shrink-0 text-[11px] text-ink underline underline-offset-2"
-                >
-                  use
-                </button>
+              <li key={a.sha256} className="flex items-center gap-3 border-b border-edge px-4 py-2.5 last:border-b-0 sm:px-6">
+                <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-mute">{a.name}</span>
+                <Label>
+                  {a.layout.mods} mods, {bytes(a.size)}
+                </Label>
+                <Button size="sm" onClick={() => onStaged(a)}>
+                  Use
+                </Button>
               </li>
             ))}
           </ul>
         </details>
       )}
-      <p className="mt-2 text-[11px] text-faint">
-        {name} keeps its world, server.properties, ops, whitelist and jvm args. mods are replaced,
-        not merged, and configs the pack ships are overwritten.
-      </p>
-    </section>
+      <Hint className="border-t border-edge px-4 py-3 sm:px-6">
+        {name} keeps its world, server.properties, ops, whitelist and JVM args. Mods are replaced, not
+        merged, and configs the pack ships are overwritten.
+      </Hint>
+    </Section>
   );
 }
 
-// RunPane is the only thing on screen worth looking at while a run is going,
-// because the steps are minutes apart and a spinner alone says nothing.
-function RunPane({ run }: { run: Run }) {
-  return (
-    <section className="mb-6 rounded border border-warn/40 bg-warn/5 p-3">
-      <div className="flex items-center gap-2">
-        <Spinner />
-        <span className="text-sm text-warn">
-          {run.kind === "upgrade" ? "upgrading to" : "going back to"} {run.label}
-        </span>
-      </div>
-      <ol className="mt-3 space-y-1.5">
-        {run.steps.map((s, i) => (
-          <StepRow key={i} s={s} />
-        ))}
-      </ol>
-      <p className="mt-3 text-[11px] text-faint">
-        this survives closing the page. the server is stopped for the whole run.
-      </p>
-    </section>
-  );
-}
-
-function StepRow({ s }: { s: Step }) {
-  const mark =
-    s.state === "running" ? (
-      <Spinner />
-    ) : (
-      <span
-        className={`w-3 shrink-0 text-center text-[11px] ${
-          s.state === "failed" ? "text-bad" : s.state === "skipped" ? "text-faint" : "text-live"
-        }`}
-      >
-        {s.state === "failed" ? "×" : s.state === "skipped" ? "–" : "✓"}
-      </span>
-    );
-  return (
-    <li className="flex items-start gap-2 text-xs">
-      <span className="mt-0.5">{mark}</span>
-      <span className="min-w-0">
-        <span className={s.state === "failed" ? "text-bad" : "text-ink"}>{s.name}</span>
-        {s.detail && <span className="text-[11px] text-faint"> · {s.detail}</span>}
-      </span>
-    </li>
-  );
-}
-
-// History is the downgrade path. Every row that still has an archive is a
-// version this server can be put back on in one tap.
+// History is the way back. Every row that still has an archive is a version
+// this server can be put back on.
 function History({ name, versions, busy }: { name: string; versions: Version[]; busy: boolean }) {
   const qc = useQueryClient();
   const refresh = () => qc.invalidateQueries({ queryKey: ["versions", name] });
@@ -338,61 +375,65 @@ function History({ name, versions, busy }: { name: string; versions: Version[]; 
   const drop = useMutation({ mutationFn: (id: number) => api.dropSnapshot(name, id), onSuccess: refresh });
   const [confirming, setConfirming] = useState<Version | null>(null);
 
-  if (versions.length === 0) {
-    return <p className="text-xs text-mute">no upgrades yet</p>;
-  }
   return (
-    <section>
-      <h2 className="mb-2 text-xs text-mute">versions · newest first</h2>
-      <ul className="space-y-2">
+    <Section title="History" aside={<Label>the newest 3 archives are kept</Label>}>
+      {versions.length === 0 && (
+        <Hint className="px-4 py-5 sm:px-6">No upgrades yet. Each one lands here, with a way back.</Hint>
+      )}
+      <ul>
         {versions.map((v) => (
           <li
             key={v.id}
-            className={`rounded border p-2 ${
-              v.state === "active" ? "border-live/40" : v.state === "failed" ? "border-bad/30" : "border-edge"
-            }`}
+            className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-edge px-4 py-3 last:border-b-0 sm:px-6"
           >
-            <div className="flex items-center gap-2">
-              <span className="min-w-0 flex-1 truncate text-sm text-ink">{v.label}</span>
-              <StateTag state={v.state} />
+            <span
+              className={`h-9 w-[2px] shrink-0 ${
+                v.state === "active"
+                  ? "bg-live"
+                  : v.state === "failed"
+                    ? "bg-bad"
+                    : v.state === "rolled_back"
+                      ? "bg-warn"
+                      : "bg-edge-strong"
+              }`}
+            />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-baseline gap-2">
+                <span className="truncate font-mono text-[13px]">{v.label}</span>
+                <StateTag state={v.state} />
+              </div>
+              <div className="truncate font-mono text-[10.5px] text-faint">
+                {fmtDate(v.applied_at)}
+                {v.source === "revert" && ", put back"}
+                {v.source === "baseline" && ", already on disk"}
+                {v.snapshot_bytes > 0
+                  ? `, ${bytes(v.snapshot_bytes)} archived`
+                  : v.state !== "active"
+                    ? ", archive pruned"
+                    : ""}
+                {v.world_backup && ", world backup kept"}
+              </div>
+              {v.note && <div className="font-mono text-[10.5px] text-faint">{v.note}</div>}
             </div>
-            <div className="mt-1 text-[11px] text-faint">
-              {new Date(v.applied_at).toLocaleString()}
-              {v.source === "revert" && " · put back"}
-              {v.source === "baseline" && " · already on disk"}
-              {v.snapshot_bytes > 0 ? ` · ${bytes(v.snapshot_bytes)} archived` : " · archive pruned"}
-              {v.world_backup && " · world backup kept"}
-            </div>
-            {v.note && <div className="mt-1 text-[11px] text-faint">{v.note}</div>}
-            {v.state !== "active" && (
-              <div className="mt-2 flex items-center gap-3">
-                <button
-                  disabled={busy || v.snapshot_bytes === 0 || revert.isPending}
-                  onClick={() => setConfirming(v)}
-                  className="text-[11px] text-ink underline underline-offset-2 disabled:text-faint disabled:no-underline"
-                >
-                  {v.snapshot_bytes === 0 ? "archive pruned, cannot go back" : "go back to this"}
-                </button>
-                {v.snapshot_bytes > 0 && (
-                  <button
-                    disabled={busy || drop.isPending}
-                    onClick={() => drop.mutate(v.id)}
-                    className="text-[11px] text-faint hover:text-mute"
-                  >
-                    free the archive
-                  </button>
-                )}
+            {v.state !== "active" && v.snapshot_bytes > 0 && (
+              <div className="flex shrink-0 gap-1.5">
+                <Button size="sm" disabled={busy || revert.isPending} onClick={() => setConfirming(v)}>
+                  Go back
+                </Button>
+                <Button size="sm" variant="ghost" disabled={busy || drop.isPending} onClick={() => drop.mutate(v.id)}>
+                  Free archive
+                </Button>
               </div>
             )}
           </li>
         ))}
       </ul>
-      <p className="mt-2 text-[11px] text-faint">
-        the newest three archives are kept. older versions stay in this list but can no longer be
-        returned to.
-      </p>
-      {revert.error && <Problem error={revert.error} />}
-      {drop.error && <Problem error={drop.error} />}
+      {(revert.error || drop.error) && (
+        <div className="px-4 sm:px-6">
+          {revert.error && <Problem error={revert.error} />}
+          {drop.error && <Problem error={drop.error} />}
+        </div>
+      )}
 
       {confirming && (
         <ConfirmRevert
@@ -405,32 +446,37 @@ function History({ name, versions, busy }: { name: string; versions: Version[]; 
           }}
         />
       )}
-    </section>
+    </Section>
   );
 }
 
 function StateTag({ state }: { state: Version["state"] }) {
-  const tone =
+  const [tone, word] =
     state === "active"
-      ? "text-live"
+      ? ["text-live", "in use"]
       : state === "failed"
-        ? "text-bad"
+        ? ["text-bad", "did not boot"]
         : state === "rolled_back"
-          ? "text-warn"
-          : "text-faint";
-  const word =
-    state === "active"
-      ? "running now"
-      : state === "failed"
-        ? "did not boot"
-        : state === "rolled_back"
-          ? "abandoned"
-          : "replaced";
-  return <span className={`shrink-0 text-[11px] ${tone}`}>{word}</span>;
+          ? ["text-warn", "abandoned"]
+          : ["text-faint", "replaced"];
+  return <span className={`shrink-0 font-mono text-[10.5px] ${tone}`}>{word}</span>;
 }
 
-// Both confirmations sit at the bottom of the screen rather than where the
-// button was, so the second tap never lands on the spot the first one left.
+function Steps({ lines }: { lines: string[] }) {
+  return (
+    <ol className="space-y-1.5 font-mono text-[11.5px]">
+      {lines.map((l, i) => (
+        <li key={l} className="flex gap-[1ch]">
+          <span className="w-[2ch] shrink-0 text-right text-faint">{i + 1}</span>
+          <span className="text-mute">{l}</span>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+// The confirmations list what will happen, in order, because the order is
+// the reason it is safe.
 function ConfirmUpgrade({
   a,
   label,
@@ -446,19 +492,29 @@ function ConfirmUpgrade({
 }) {
   return (
     <Sheet
-      title={`upgrade to ${label}`}
-      lines={[
-        online ? "the server is stopped first" : "the server is already stopped",
-        "the world is backed up cold, with nothing writing to it",
-        "the current mods, configs and run.sh are archived so this is undoable",
-        `mods are replaced with the ${a.layout.mods} in this pack`,
-        "if it does not finish booting in 15 minutes, the old version is put back automatically",
-      ]}
-      go="upgrade"
-      tone="live"
+      title={`Upgrade to ${label}?`}
       onCancel={onCancel}
-      onGo={onGo}
-    />
+      actions={
+        <>
+          <Button variant="ghost" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={onGo}>
+            Upgrade
+          </Button>
+        </>
+      }
+    >
+      <Steps
+        lines={[
+          online ? "stop the server" : "the server is already stopped",
+          "back up the world while nothing writes to it",
+          "archive the current mods, configs and run.sh",
+          `replace the mods with the ${a.layout.mods} in this pack`,
+          "start it; if it does not boot in 15 min, put the old files back",
+        ]}
+      />
+    </Sheet>
   );
 }
 
@@ -474,81 +530,40 @@ function ConfirmRevert({
   const [world, setWorld] = useState(false);
   return (
     <Sheet
-      title={`go back to ${v.label}`}
-      lines={[
-        "the server is stopped and the world is backed up first",
-        "the files you are on now are archived, so this is undoable too",
-        world
-          ? `the world is also rewound to the backup taken ${since(v.applied_at)} ago`
-          : "the world you have now is kept as it is",
-      ]}
-      go="go back"
-      tone="warn"
+      title={`Go back to ${v.label}?`}
       onCancel={onCancel}
-      onGo={() => onGo(world)}
-      extra={
-        v.world_backup ? (
-          <label className="flex items-start gap-2 text-[11px] text-mute">
-            <input
-              type="checkbox"
-              checked={world}
-              onChange={(e) => setWorld(e.target.checked)}
-              className="mt-0.5"
-            />
-            <span>
-              also restore the world from that version. tick this when the world has been played on
-              newer mods and would break on the old ones.
-            </span>
-          </label>
-        ) : null
+      actions={
+        <>
+          <Button variant="ghost" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={() => onGo(world)}>
+            Go back
+          </Button>
+        </>
       }
-    />
-  );
-}
-
-function Sheet({
-  title,
-  lines,
-  go,
-  tone,
-  extra,
-  onCancel,
-  onGo,
-}: {
-  title: string;
-  lines: string[];
-  go: string;
-  tone: "live" | "warn";
-  extra?: React.ReactNode;
-  onCancel: () => void;
-  onGo: () => void;
-}) {
-  return (
-    <div className="fixed inset-x-0 bottom-0 z-20 p-4">
-      <div className="mx-auto max-w-3xl rounded border border-edge bg-panel p-3 shadow-lg">
-        <div className="text-sm text-ink">{title}</div>
-        <ul className="mt-2 space-y-1">
-          {lines.map((l) => (
-            <li key={l} className="text-[11px] text-mute">
-              · {l}
-            </li>
-          ))}
-        </ul>
-        {extra && <div className="mt-3">{extra}</div>}
-        <div className="mt-3 flex justify-end gap-2">
-          <button onClick={onCancel} className="px-3 py-1.5 text-xs text-mute hover:text-ink">
-            cancel
-          </button>
-          <button
-            onClick={onGo}
-            className={`rounded px-3 py-1.5 text-sm ${
-              tone === "live" ? "bg-live/15 text-live" : "bg-warn/15 text-warn"
-            }`}
-          >
-            {go}
-          </button>
-        </div>
-      </div>
-    </div>
+    >
+      <Steps
+        lines={[
+          "stop the server and back up the world",
+          "archive the files in use now, so this is undoable too",
+          world ? `rewind the world to the backup from ${since(v.applied_at)} ago` : "keep the world as it is",
+        ]}
+      />
+      {v.world_backup && (
+        <label className="mt-4 flex items-start gap-2.5 border-t border-edge pt-4 text-[12.5px] text-mute">
+          <input
+            type="checkbox"
+            checked={world}
+            onChange={(e) => setWorld(e.target.checked)}
+            className="mt-0.5 accent-[var(--color-accent)]"
+          />
+          <span>
+            Also restore the world from that version. Tick this when the world has been played on
+            newer mods and would break on the old ones.
+          </span>
+        </label>
+      )}
+    </Sheet>
   );
 }

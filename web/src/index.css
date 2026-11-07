@@ -1,18 +1,36 @@
 @import "tailwindcss";
+@import "@fontsource-variable/archivo/wdth.css";
+@import "@fontsource/martian-mono/400.css";
+@import "@fontsource/martian-mono/500.css";
 
-/* Zinc, pushed darker than zinc-950 for the page itself so panels read as
-   raised without needing borders everywhere. No blue anywhere. */
+/* Black canvas, hairline rules, square corners. Structure comes from the lines
+   between things rather than from boxes floating on a background. One accent,
+   amber, for the prompt and whatever has focus; green only ever means a server
+   is running; red means something broke. */
 @theme {
-  --color-bg: #09090b;
-  --color-panel: #18181b;
-  --color-edge: #27272a;
-  --color-ink: #fafafa;
-  --color-mute: #a1a1aa;
-  --color-faint: #52525b;
-  --color-live: #4ade80;
-  --color-dead: #52525b;
-  --color-warn: #fbbf24;
-  --color-bad: #f87171;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Martian Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-display: "Archivo Variable", ui-sans-serif, system-ui, sans-serif;
+
+  --color-bg: #0b0a0b;
+  --color-term: #0e0e0e;
+  --color-panel: #151416;
+  --color-raised: #1c1c1e;
+  --color-edge: #28282b;
+  --color-edge-strong: #48484c;
+  --color-ink: #eaeae8;
+  --color-mute: #a8a8a5;
+  --color-faint: #6f6f6d;
+  --color-accent: #ffb22e;
+  --color-live: #34d986;
+  --color-dead: #3a3a3e;
+  --color-warn: #ffb22e;
+  --color-bad: #ff5a5a;
+
+  --radius-sm: 2px;
+  --radius: 3px;
+  --radius-md: 4px;
 }
 
 html,
@@ -24,6 +42,80 @@ body,
 body {
   background: var(--color-bg);
   color: var(--color-ink);
-  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-sans);
+  font-size: 14px;
   -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+
+:focus-visible {
+  outline: 1px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--color-accent) 40%, transparent);
+  color: var(--color-ink);
+}
+
+/* Headlines: condensed and heavy, set tight. */
+.display {
+  font-family: var(--font-display);
+  font-stretch: 72%;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 0.95;
+}
+
+.scroll-quiet {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-edge) transparent;
+}
+
+/* The terminal cursor. A solid block that blinks only while the prompt has
+   focus, like a real one. */
+.cursor {
+  display: inline-block;
+  width: 0.6em;
+  height: 1.15em;
+  vertical-align: text-bottom;
+  background: var(--color-ink);
+}
+
+.prompt:focus-within .cursor {
+  animation: blink 1.05s steps(1) infinite;
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .prompt:focus-within .cursor {
+    animation: none;
+  }
+}
+
+/* Running dot: a small pulse, the only motion that is not a reply to a tap. */
+.dot-live {
+  background: var(--color-live);
+  box-shadow: 0 0 0 0 color-mix(in oklab, var(--color-live) 60%, transparent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .dot-live {
+    animation: pulse 2.4s ease-out infinite;
+  }
+}
+
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--color-live) 55%, transparent);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 5px transparent;
+  }
 }

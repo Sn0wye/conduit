@@ -22,7 +22,9 @@ export type Instance = {
 export type Info = {
   node: string;
   hostname: string;
+  os?: string;
   arch: string;
+  version?: string;
   pm2: string;
   pm2_error?: string;
   user: string;
@@ -283,11 +285,11 @@ export const api = {
 };
 
 export function bytes(n: number): string {
-  if (!n) return "0";
-  const u = ["B", "K", "M", "G", "T"];
+  if (!n) return "0 B";
+  const u = ["B", "KB", "MB", "GB", "TB"];
   const i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), u.length - 1);
   const v = n / Math.pow(1024, i);
-  return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)}${u[i]}`;
+  return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)} ${u[i]}`;
 }
 
 // since renders the gap a rollback would throw away, in the units a person

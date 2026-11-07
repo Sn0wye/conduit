@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -180,6 +181,9 @@ func (s *Server) Routes() *http.ServeMux {
 
 // --- info ---
 
+// Version is the conduitd build, shown in the PWA footer. main sets it.
+var Version = "dev"
+
 func (s *Server) info(w http.ResponseWriter, r *http.Request) error {
 	host, _ := os.Hostname()
 	ver, pmErr := s.client().Version(r.Context())
@@ -190,6 +194,7 @@ func (s *Server) info(w http.ResponseWriter, r *http.Request) error {
 		"arch":     runtime.GOARCH,
 		"pm2":      ver,
 		"user":     userFrom(r.Context()),
+		"version":  Version,
 	}
 	if pmErr != nil {
 		out["pm2_error"] = pmErr.Error()
@@ -272,14 +277,60 @@ func (s *Server) putInstance(w http.ResponseWriter, r *http.Request) error {
 		fail(w, 400, "bad_request", err)
 		return nil
 	}
-	if i.Name == "" || i.Dir == "" {
-		fail(w, 400, "bad_request", errors.New("name and dir are required"))
+	if err := validInstance(&i); err != nil {
+		fail(w, 400, "bad_request", err)
 		return nil
+	}
+	// Registering is for new servers only. An upsert here would silently
+	// blank the stored RCON password and version of an existing one.
+	if _, err := s.db.GetInstance(r.Context(), i.Name); err == nil {
+		fail(w, http.StatusConflict, "exists", fmt.Errorf("%s is already registered", i.Name))
+		return nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return err
 	}
 	if err := s.db.PutInstance(r.Context(), i); err != nil {
 		return err
 	}
 	writeJSON(w, 200, i)
+	return nil
+}
+
+// instanceName is what pm2 and the state directories accept without
+// surprises: no path separators, and no leading dash for pm2 to read as a flag.
+var instanceName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// validInstance refuses anything that would point Conduit at the wrong files.
+// Upgrades and reverts delete and replace the top level of Dir, so Dir has to
+// be a real server folder and never the home directory or the filesystem
+// root, and Script has to be a file inside it rather than any program on the
+// machine.
+func validInstance(i *store.Instance) error {
+	if !instanceName.MatchString(i.Name) {
+		return errors.New("name may only use letters, digits, '.', '_' and '-', and must start with a letter or digit")
+	}
+	if i.Script == "" {
+		i.Script = "./run.sh"
+	}
+	if !filepath.IsAbs(i.Dir) {
+		return errors.New("dir must be an absolute path")
+	}
+	dir := filepath.Clean(i.Dir)
+	home, _ := os.UserHomeDir()
+	if dir == "/" || dir == filepath.Clean(home) || dir == filepath.Dir(filepath.Clean(home)) {
+		return fmt.Errorf("%s is not a server folder", dir)
+	}
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		return fmt.Errorf("%s is not a directory", dir)
+	}
+	script := filepath.Clean(i.Script)
+	if filepath.IsAbs(script) || script == ".." || strings.HasPrefix(script, "../") {
+		return errors.New("script must be a file inside dir, like ./run.sh")
+	}
+	if fi, err := os.Stat(filepath.Join(dir, script)); err != nil || fi.IsDir() {
+		return fmt.Errorf("no %s in %s", i.Script, dir)
+	}
+	i.Dir = dir
 	return nil
 }
 
@@ -519,6 +570,17 @@ func (s *Server) patchSettings(w http.ResponseWriter, r *http.Request) error {
 	var body map[string]*string
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		fail(w, 400, "bad_request", err)
+		return nil
+	}
+	// Settings decide which program runs as pm2 and who owns the machine, so
+	// only the owner changes them. A guest who could would be one PATCH away
+	// from locking the owner out, or from running any binary as this user.
+	owner, err := s.db.Setting(r.Context(), settings.KeyOwner)
+	if err != nil {
+		return err
+	}
+	if owner != "" && userFrom(r.Context()) != owner {
+		fail(w, http.StatusForbidden, "not_owner", errors.New("only "+owner+" can change settings"))
 		return nil
 	}
 	allowed := map[string]bool{

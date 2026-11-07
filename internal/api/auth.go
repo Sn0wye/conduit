@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"slices"
 	"strings"
@@ -100,4 +101,50 @@ func DevCORS(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// Guard sits in front of everything served on the tailnet and closes the two
+// ways a web page the owner happens to visit could act as the owner. The
+// tailnet IP is the only credential, and a browser attaches it to any request
+// it sends, wherever the page that sent it came from.
+//
+//   - Cross-site requests: a form post or a no-cors fetch with a text/plain
+//     body needs no preflight, so CORS alone does not stop it. Unsafe methods
+//     from another origin are refused, by Sec-Fetch-Site or by Origin.
+//   - DNS rebinding: a hostile name that resolves to this node's address
+//     would make the page same-origin. Only the node's own names and
+//     addresses are accepted in Host.
+func Guard(hosts []string, next http.Handler) http.Handler {
+	allowed := map[string]bool{}
+	for _, h := range hosts {
+		if h = normHost(h); h != "" {
+			allowed[h] = true
+		}
+	}
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !allowed[normHost(r.Host)] {
+			log.Printf("denied %s: unexpected host %q", r.RemoteAddr, r.Host)
+			fail(w, http.StatusMisdirectedRequest, "bad_host", errors.New("this address does not belong to conduit"))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+	return http.NewCrossOriginProtection().Handler(inner)
+}
+
+func normHost(h string) string {
+	if host, _, err := net.SplitHostPort(h); err == nil {
+		h = host
+	}
+	return strings.ToLower(strings.TrimSuffix(strings.Trim(h, "[]"), "."))
+}
+
+// Names lists every way the node can legitimately be addressed: its MagicDNS
+// name, the short name MagicDNS also answers to, and its tailnet addresses.
+func Names(fqdn string, ips ...string) []string {
+	out := append([]string{fqdn}, ips...)
+	if short, _, ok := strings.Cut(fqdn, "."); ok {
+		out = append(out, short)
+	}
+	return out
 }

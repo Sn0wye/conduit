@@ -67,6 +67,19 @@ func (s *Server) FQDN(ctx context.Context) (string, error) {
 	return strings.TrimSuffix(st.Self.DNSName, "."), nil
 }
 
+// IPs are this node's tailnet addresses.
+func (s *Server) IPs() []string {
+	var out []string
+	v4, v6 := s.ts.TailscaleIPs()
+	if v4.IsValid() {
+		out = append(out, v4.String())
+	}
+	if v6.IsValid() {
+		out = append(out, v6.String())
+	}
+	return out
+}
+
 // Tailnet returns the domain suffix, for example tailbcc11b.ts.net.
 func (s *Server) Tailnet(ctx context.Context) string {
 	fqdn, err := s.FQDN(ctx)
