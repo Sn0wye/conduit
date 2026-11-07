@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   api,
@@ -9,55 +9,176 @@ import {
   type Instance,
   type Rollback,
   type SettingsPatch,
+  type Stats as StatsT,
 } from "./api";
-import { Problem, Spinner } from "./ui";
-import { Upgrades } from "./Upgrades";
+import {
+  Button,
+  Dot,
+  Hint,
+  Label,
+  Notice,
+  Problem,
+  Section,
+  Sheet,
+  Spinner,
+  Window,
+  statusWord,
+} from "./ui";
+import { Upgrades, fmtDate } from "./Upgrades";
 
 type Screen = { view: "list" } | { view: "detail"; name: string } | { view: "settings" };
 
+// The screen lives in the hash so a refresh keeps it and the phone's back
+// button walks back out of a server instead of closing the app.
+function parseHash(): Screen {
+  const h = decodeURIComponent(location.hash.replace(/^#\/?/, ""));
+  if (h === "settings") return { view: "settings" };
+  if (h.startsWith("s/") && h.length > 2) return { view: "detail", name: h.slice(2).split("/")[0] };
+  return { view: "list" };
+}
+
+function useScreen(): [Screen, (s: Screen) => void] {
+  const [screen, set] = useState<Screen>(parseHash);
+  useEffect(() => {
+    const on = () => set(parseHash());
+    window.addEventListener("hashchange", on);
+    return () => window.removeEventListener("hashchange", on);
+  }, []);
+  const go = useCallback((s: Screen) => {
+    location.hash =
+      s.view === "detail" ? `/s/${encodeURIComponent(s.name)}` : s.view === "settings" ? "/settings" : "/";
+  }, []);
+  return [screen, go];
+}
+
+function useWide() {
+  const q = "(min-width: 768px)";
+  const [wide, set] = useState(() => matchMedia(q).matches);
+  useEffect(() => {
+    const m = matchMedia(q);
+    const on = () => set(m.matches);
+    m.addEventListener("change", on);
+    return () => m.removeEventListener("change", on);
+  }, []);
+  return wide;
+}
+
 export default function App() {
-  const [screen, setScreen] = useState<Screen>({ view: "list" });
+  const [screen, go] = useScreen();
+  const wide = useWide();
   const info = useQuery({ queryKey: ["info"], queryFn: api.info });
+  const instances = useQuery({ queryKey: ["instances"], queryFn: api.instances });
+
+  // On a desk the list and the server sit side by side, so the list route
+  // still shows a server: the running one, or the first.
+  const live = instances.data?.find((i) => i.status === "online");
+  const shown =
+    screen.view === "detail"
+      ? screen.name
+      : screen.view === "list" && wide
+        ? (live?.name ?? instances.data?.[0]?.name)
+        : undefined;
+  const showList = wide || screen.view === "list";
+  const showMain = wide || screen.view !== "list";
 
   return (
-    <div className="mx-auto flex h-full max-w-3xl flex-col overflow-hidden">
-      <header className="flex items-center gap-3 border-b border-edge px-4 py-3">
-        <button onClick={() => setScreen({ view: "list" })} className="text-sm">
-          {info.data?.hostname ?? "conduit"}
+    <div className="flex h-full flex-col pt-[env(safe-area-inset-top)]">
+      <header className="flex h-12 shrink-0 items-stretch border-b border-edge">
+        <button
+          onClick={() => go({ view: "list" })}
+          className="flex min-w-0 items-center gap-2.5 px-4 md:w-72 md:border-r md:border-edge"
+        >
+          <img src="/icon.svg" alt="" className="size-5" />
+          <span className="text-[14px] font-semibold tracking-tight">conduit</span>
+          <span className="truncate font-mono text-[11px] text-faint">/ {info.data?.hostname ?? "…"}</span>
         </button>
         <span className="flex-1" />
-        {info.data?.pm2_error && <span className="text-xs text-bad">pm2 unusable</span>}
+        {info.data?.pm2_error && (
+          <button
+            onClick={() => go({ view: "settings" })}
+            title={info.data.pm2_error}
+            className="flex items-center gap-2 border-l border-edge px-4 font-mono text-[11px] text-bad"
+          >
+            <Dot status="errored" /> pm2
+          </button>
+        )}
+        {info.data?.pm2 && (
+          <span className="hidden items-center border-l border-edge px-4 font-mono text-[11px] text-faint sm:flex">
+            pm2 {info.data.pm2}
+          </span>
+        )}
+        {info.data?.version && (
+          <span className="hidden items-center border-l border-edge px-4 font-mono text-[11px] text-faint sm:flex">
+            {info.data.version}
+          </span>
+        )}
         <button
-          onClick={() => setScreen({ view: "settings" })}
-          className="text-xs text-mute hover:text-ink"
+          onClick={() => go({ view: "settings" })}
+          className={`flex items-center border-l border-edge px-4 text-[13px] ${
+            screen.view === "settings" ? "bg-panel text-ink" : "text-mute hover:text-ink"
+          }`}
         >
-          settings
+          Settings
         </button>
       </header>
 
-      {screen.view === "settings" && <SettingsScreen onBack={() => setScreen({ view: "list" })} />}
-      {screen.view === "detail" && (
-        <Detail name={screen.name} onBack={() => setScreen({ view: "list" })} />
-      )}
-      {screen.view === "list" && (
-        <InstanceList onOpen={(name) => setScreen({ view: "detail", name })} />
-      )}
+      <div className="flex min-h-0 flex-1">
+        {showList && (
+          <aside className="scroll-quiet flex w-full shrink-0 flex-col overflow-y-auto md:w-72 md:border-r md:border-edge">
+            <ServerList
+              instances={instances.data}
+              error={instances.error}
+              loading={instances.isPending}
+              selected={screen.view === "settings" ? undefined : shown}
+              onOpen={(name) => go({ view: "detail", name })}
+            />
+          </aside>
+        )}
+        {showMain && (
+          <main className="flex min-w-0 flex-1 flex-col">
+            {screen.view === "settings" ? (
+              <SettingsScreen onBack={() => go({ view: "list" })} />
+            ) : shown ? (
+              <Detail key={shown} name={shown} onBack={() => go({ view: "list" })} />
+            ) : (
+              wide && instances.data && <Empty />
+            )}
+          </main>
+        )}
+      </div>
     </div>
   );
 }
 
-function dot(status: string) {
-  if (status === "online") return "bg-live";
-  if (status === "errored") return "bg-bad";
-  // unknown means pm2 could not be reached, which is a problem. not_started
-  // just means this instance has never been launched through Conduit.
-  if (status === "unknown") return "bg-warn";
-  return "bg-dead";
+function Empty() {
+  return (
+    <div className="flex flex-1 items-center justify-center p-8">
+      <div className="max-w-sm">
+        <div className="display text-[44px]">No servers yet.</div>
+        <Hint className="mt-3">
+          Conduit lists what pm2 runs and any server folder under the servers root. Folders it
+          finds show up on the left to add. Point the servers root somewhere else in settings if
+          the list stays empty.
+        </Hint>
+      </div>
+    </div>
+  );
 }
 
-function InstanceList({ onOpen }: { onOpen: (n: string) => void }) {
+function ServerList({
+  instances,
+  error,
+  loading,
+  selected,
+  onOpen,
+}: {
+  instances?: Instance[];
+  error: unknown;
+  loading: boolean;
+  selected?: string;
+  onOpen: (n: string) => void;
+}) {
   const qc = useQueryClient();
-  const instances = useQuery({ queryKey: ["instances"], queryFn: api.instances });
   const scan = useQuery({ queryKey: ["scan"], queryFn: api.scan, refetchInterval: false });
   const adopt = useMutation({
     mutationFn: (i: Partial<Instance>) => api.register(i),
@@ -67,61 +188,109 @@ function InstanceList({ onOpen }: { onOpen: (n: string) => void }) {
     },
   });
 
-  // One server runs at a time because they all share port 25565, so the list is
-  // a single choice rather than a row of independent toggles.
-  const live = useMemo(
-    () => instances.data?.find((i) => i.status === "online")?.name ?? null,
-    [instances.data],
+  // Only one server runs at a time, because they all share port 25565. The
+  // running one goes first so the list reads as "this one, and the others".
+  const sorted = useMemo(
+    () =>
+      [...(instances ?? [])].sort(
+        (a, b) => Number(b.status === "online") - Number(a.status === "online"),
+      ),
+    [instances],
   );
 
-  if (instances.error) return <Problem error={instances.error} />;
-
   return (
-    <main className="flex-1 overflow-y-auto p-4">
-      <p className="mb-3 text-xs text-mute">{live ? `${live} is live` : "nothing running"}</p>
-      <ul className="space-y-1">
-        {instances.data?.map((i) => (
-          <li key={i.name}>
-            <button
-              onClick={() => onOpen(i.name)}
-              className="flex w-full items-center gap-3 rounded border border-edge bg-panel px-3 py-2.5 text-left hover:border-mute"
-            >
-              <span className={`size-2 shrink-0 rounded-full ${dot(i.status)}`} />
-              <span className="flex-1 truncate text-sm">{i.name}</span>
-              {i.status === "online" && (
-                <span className="text-xs text-mute">
-                  {i.memory_mb > 0 && `${(i.memory_mb / 1024).toFixed(1)}G`} {uptime(i.uptime_ms)}
+    <>
+      <div className="flex h-10 shrink-0 items-center justify-between border-b border-edge px-4">
+        <Label>servers</Label>
+        <Label>{instances ? instances.length : ""}</Label>
+      </div>
+      {error ? (
+        <div className="px-4">
+          <Problem error={error} />
+        </div>
+      ) : null}
+      {loading && (
+        <div className="flex items-center gap-2 border-b border-edge px-4 py-4 font-mono text-[11px] text-faint">
+          <Spinner /> asking pm2
+        </div>
+      )}
+      {instances?.length === 0 && (
+        <Hint className="border-b border-edge px-4 py-4">No servers registered yet.</Hint>
+      )}
+      <ul>
+        {sorted.map((i) => {
+          const on = i.name === selected;
+          return (
+            <li key={i.name}>
+              <button
+                onClick={() => onOpen(i.name)}
+                aria-current={on ? "page" : undefined}
+                className={`relative flex w-full items-center gap-3 border-b border-edge px-4 py-3 text-left transition-colors ${
+                  on ? "bg-panel" : "hover:bg-panel/60"
+                }`}
+              >
+                {on && <span className="absolute inset-y-0 left-0 w-[2px] bg-accent" />}
+                <Dot status={i.status} />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[14px] font-medium">{i.name}</span>
+                  <span className="block truncate font-mono text-[10.5px] text-faint">
+                    {i.version || i.dir.split("/").pop()}
+                  </span>
                 </span>
-              )}
-            </button>
-          </li>
-        ))}
+                <span
+                  className={`shrink-0 font-mono text-[10.5px] ${
+                    i.status === "online"
+                      ? "text-live"
+                      : i.status === "errored"
+                        ? "text-bad"
+                        : i.status === "unknown" || i.status === "launching" || i.status === "stopping"
+                          ? "text-warn"
+                          : "text-faint"
+                  }`}
+                >
+                  {i.status === "online" ? uptime(i.uptime_ms) || "up" : statusWord(i.status)}
+                </span>
+              </button>
+            </li>
+          );
+        })}
       </ul>
 
       {scan.data && scan.data.length > 0 && (
-        <section className="mt-6">
-          <h2 className="mb-2 text-xs text-mute">found on disk, not registered</h2>
-          <ul className="space-y-1">
+        <>
+          <div className="mt-6 flex h-10 shrink-0 items-center border-y border-edge px-4">
+            <Label>found on disk, not managed yet</Label>
+          </div>
+          <ul>
             {scan.data.map((i) => (
-              <li
-                key={i.name}
-                className="flex items-center gap-3 rounded border border-dashed border-edge px-3 py-2"
-              >
-                <span className="flex-1 truncate text-sm text-mute">{i.name}</span>
-                <button
+              <li key={i.name} className="flex items-center gap-3 border-b border-edge px-4 py-3">
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[14px] text-mute">{i.name}</span>
+                  <span className="block truncate font-mono text-[10.5px] text-faint">{i.dir}</span>
+                </span>
+                <Button
+                  size="sm"
                   onClick={() => adopt.mutate(i)}
-                  className="text-xs text-ink underline underline-offset-2"
+                  busy={adopt.isPending && adopt.variables?.name === i.name}
                 >
-                  add
-                </button>
+                  Add
+                </Button>
               </li>
             ))}
           </ul>
-        </section>
+          {adopt.error && (
+            <div className="px-4">
+              <Problem error={adopt.error} />
+            </div>
+          )}
+        </>
       )}
-    </main>
+    </>
   );
 }
+
+type Tab = "console" | "backups" | "upgrades";
+const tabNames: Record<Tab, string> = { console: "Console", backups: "Backups", upgrades: "Versions" };
 
 function Detail({ name, onBack }: { name: string; onBack: () => void }) {
   const qc = useQueryClient();
@@ -130,10 +299,16 @@ function Detail({ name, onBack }: { name: string; onBack: () => void }) {
     qc.invalidateQueries({ queryKey: ["stats", name] });
   };
 
-  // The log tab is the default on purpose. Opening the console opens an RCON
-  // connection, and nothing should open one just because a screen was looked
-  // at.
-  const [tab, setTab] = useState<"logs" | "console" | "backups" | "upgrades">("logs");
+  // The tab rides in the hash too, replaced rather than pushed, so a refresh
+  // keeps it without every tab switch becoming a back-button stop.
+  const [tab, setTabState] = useState<Tab>(() => {
+    const t = location.hash.split("/")[3] as Tab;
+    return t in tabNames ? t : "console";
+  });
+  const setTab = (t: Tab) => {
+    setTabState(t);
+    history.replaceState(null, "", `#/s/${encodeURIComponent(name)}${t === "console" ? "" : `/${t}`}`);
+  };
 
   // The backup watch lives here rather than in the tab, so switching to the
   // console while the mod zips does not throw the wait away.
@@ -166,11 +341,13 @@ function Detail({ name, onBack }: { name: string; onBack: () => void }) {
 
   const instances = useQuery({ queryKey: ["instances"], queryFn: api.instances });
   const inst = instances.data?.find((i) => i.name === name);
+  const other = instances.data?.find((i) => i.status === "online" && i.name !== name)?.name;
 
   const stats = useQuery({
     queryKey: ["stats", name],
     queryFn: () => api.stats(name),
-    refetchInterval: 5000,
+    refetchInterval: (q) =>
+      q.state.data?.status === "launching" || q.state.data?.status === "stopping" ? 1500 : 5000,
   });
 
   const start = useMutation({ mutationFn: () => api.start(name), onSuccess: invalidate });
@@ -179,71 +356,96 @@ function Detail({ name, onBack }: { name: string; onBack: () => void }) {
   const busy = start.isPending || stop.isPending || restart.isPending;
   const err = start.error ?? stop.error ?? restart.error;
 
-  const online = stats.data?.status === "online" || inst?.status === "online";
+  const status = stats.data?.status ?? inst?.status ?? "stopped";
+  const online = status === "online";
+  const moving = status === "launching" || status === "stopping";
   const disk = stats.data?.disk;
+  const [confirmSwitch, setConfirmSwitch] = useState(false);
+  const known = !!stats.data || !!inst;
 
   return (
-    <main className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <div className="flex items-center gap-3 border-b border-edge px-4 py-3">
-        <button onClick={onBack} className="text-sm text-mute hover:text-ink">
-          back
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="border-b border-edge px-4 pb-5 pt-4 sm:px-6">
+        <button onClick={onBack} className="mb-3 font-mono text-[11px] text-faint hover:text-ink md:hidden">
+          ← servers
         </button>
-        <span className={`size-2 rounded-full ${dot(stats.data?.status ?? inst?.status ?? "stopped")}`} />
-        <h1 className="flex-1 truncate text-sm">{name}</h1>
-      </div>
-
-      <div className="flex gap-2 px-4 py-3">
-        <button
-          disabled={busy || online}
-          onClick={() => start.mutate()}
-          className="rounded bg-live/15 px-3 py-1.5 text-sm text-live disabled:opacity-30"
-        >
-          start
-        </button>
-        <button
-          disabled={busy || !online}
-          onClick={() => stop.mutate()}
-          className="rounded bg-bad/15 px-3 py-1.5 text-sm text-bad disabled:opacity-30"
-        >
-          stop
-        </button>
-        <button
-          disabled={busy || !online}
-          onClick={() => restart.mutate()}
-          className="rounded bg-panel px-3 py-1.5 text-sm text-mute disabled:opacity-30"
-        >
-          restart
-        </button>
-        {busy && <span className="self-center text-xs text-mute">working, this takes a while</span>}
+        <div className="flex flex-wrap items-end gap-x-6 gap-y-4">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 font-mono text-[11px]">
+              <Dot status={status} />
+              <span className={online ? "text-live" : status === "errored" ? "text-bad" : moving ? "text-warn" : "text-faint"}>
+                {busy && !moving
+                  ? start.isPending
+                    ? "starting"
+                    : stop.isPending
+                      ? "stopping"
+                      : "restarting"
+                  : statusWord(status)}
+                {online && stats.data?.uptime_ms ? ` for ${uptime(stats.data.uptime_ms)}` : ""}
+              </span>
+            </div>
+            <h1 className="display mt-2.5 truncate text-[40px] sm:text-[52px]">{name}</h1>
+            <div className="mt-2 truncate font-mono text-[11px] text-faint">
+              {inst?.version || "no version recorded"}
+            </div>
+          </div>
+          {/* Nothing until the status is known: a Start that turns into Stop
+              a second later is a tap on the wrong button. */}
+          {known && (
+            <div className="flex gap-2">
+              {online || status === "stopping" ? (
+                <>
+                  <Button key="restart" disabled={busy || moving} busy={restart.isPending} onClick={() => restart.mutate()}>
+                    Restart
+                  </Button>
+                  <Button
+                    key="stop"
+                    variant="danger"
+                    disabled={busy || moving}
+                    busy={stop.isPending || status === "stopping"}
+                    onClick={() => stop.mutate()}
+                  >
+                    Stop
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  key="start"
+                  variant="primary"
+                  disabled={busy || moving}
+                  busy={start.isPending || status === "launching"}
+                  onClick={() => (other ? setConfirmSwitch(true) : start.mutate())}
+                >
+                  {status === "launching" ? "Starting" : "Start"}
+                </Button>
+              )}
+            </div>
+          )}
+        </div>
+        {err && <Problem error={err} />}
       </div>
 
       <Stats stats={stats.data} online={online} />
 
-      {err && <Problem error={err} />}
-
-      <div className="flex gap-4 border-b border-edge px-4">
-        {(["logs", "console", "backups", "upgrades"] as const).map((t) => (
+      <nav className="flex h-10 shrink-0 items-stretch border-b border-edge">
+        {(Object.keys(tabNames) as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`-mb-px border-b-2 py-2 text-xs ${
-              tab === t ? "border-ink text-ink" : "border-transparent text-mute hover:text-ink"
+            aria-current={tab === t ? "page" : undefined}
+            className={`relative flex items-center gap-2 border-r border-edge px-4 text-[13px] transition-colors sm:px-6 ${
+              tab === t ? "bg-panel text-ink" : "text-faint hover:text-mute"
             }`}
           >
-            {t}
+            {tabNames[t]}
+            {t === "backups" && watch && <Spinner className="text-accent" />}
+            {tab === t && <span className="absolute inset-x-0 -bottom-px h-px bg-accent" />}
           </button>
         ))}
-        {disk && (
-          <span className="ml-auto self-center text-xs text-faint">
-            {bytes(disk.free_bytes)} free of {bytes(disk.total_bytes)}
-          </span>
-        )}
-      </div>
+      </nav>
 
       <div className="flex min-h-0 flex-1 flex-col">
-        {tab === "logs" ? (
-          <LogPane name={name} />
-        ) : tab === "console" ? (
+        {tab === "console" ? (
           <Console name={name} inst={inst} online={online} />
         ) : tab === "upgrades" ? (
           <Upgrades name={name} online={online} freeBytes={disk?.free_bytes} />
@@ -265,126 +467,144 @@ function Detail({ name, onBack }: { name: string; onBack: () => void }) {
       </div>
 
       {fresh && <NewBackup b={fresh} onClose={() => setFresh(null)} />}
-    </main>
+      {confirmSwitch && other && (
+        <Sheet
+          title={`Switch to ${name}?`}
+          onCancel={() => setConfirmSwitch(false)}
+          actions={
+            <>
+              <Button variant="ghost" onClick={() => setConfirmSwitch(false)}>
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                onClick={() => {
+                  setConfirmSwitch(false);
+                  start.mutate();
+                }}
+              >
+                Stop {other} and start
+              </Button>
+            </>
+          }
+        >
+          {other} is running. Every server here shares one port, so it is stopped first and its
+          players are disconnected.
+        </Sheet>
+      )}
+    </div>
   );
 }
 
-function Stats({ stats, online }: { stats?: import("./api").Stats; online: boolean }) {
+// Stats is one ruled row of cells: whether the server is healthy, and how much
+// room it takes.
+function Stats({ stats, online }: { stats?: StatsT; online: boolean }) {
   const d = stats?.disk;
   const count = stats?.players_online ?? -1;
   // The count comes over RCON, and RCON is only connected while the console
-  // tab is open. A dash says "not being read" rather than "nobody online".
+  // prompt is in use. A dash says "not being read" rather than "nobody online".
   const players = online && stats?.rcon_open && count >= 0 ? `${count}/${stats?.players_max ?? "?"}` : "—";
-  const who = stats?.rcon_open
-    ? stats?.players?.join(", ")
-    : "open the console tab to read the player list";
+  const who = stats?.rcon_open ? stats?.players?.join(", ") : "Click the console prompt to read the player list";
 
+  const cells: [string, string, string?][] = [
+    ["players", players, who],
+    ["cpu", online ? `${(stats?.cpu_pct ?? 0).toFixed(0)}%` : "—"],
+    ["memory", online && stats?.memory_mb ? `${(stats.memory_mb / 1024).toFixed(1)} GB` : "—"],
+    ["world", d ? bytes(d.world_bytes) : "…"],
+    ["backups", d ? bytes(d.backup_bytes) : "…"],
+    ["disk free", d ? `${bytes(d.free_bytes)}` : "…", d ? `of ${bytes(d.total_bytes)}` : undefined],
+  ];
   return (
-    <div className="grid grid-cols-5 gap-px border-y border-edge bg-edge text-center">
-      <Cell label="players" value={players} title={who} />
-      <Cell label="cpu" value={online ? `${(stats?.cpu_pct ?? 0).toFixed(0)}%` : "—"} />
-      <Cell
-        label="memory"
-        value={online && stats?.memory_mb ? `${(stats.memory_mb / 1024).toFixed(1)}G` : "—"}
-      />
-      <Cell label="world" value={d ? bytes(d.world_bytes) : "…"} />
-      <Cell label="backups" value={d ? bytes(d.backup_bytes) : "…"} />
-    </div>
+    <dl className="grid shrink-0 grid-cols-3 border-b border-edge lg:grid-cols-6">
+      {cells.map(([label, value, title], i) => (
+        <div
+          key={label}
+          title={title || undefined}
+          className={`border-edge px-4 py-3 sm:px-6 ${i % 3 !== 2 ? "border-r" : ""} ${
+            i < 3 ? "border-b lg:border-b-0" : ""
+          } lg:border-r lg:last:border-r-0`}
+        >
+          <dt>
+            <Label>{label}</Label>
+          </dt>
+          <dd className="mt-1 font-mono text-[15px] tabular-nums">{value}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }
 
-// title carries the player names, so the card stays a number and hovering
-// still answers "who".
-function Cell({ label, value, title }: { label: string; value: string; title?: string }) {
-  return (
-    <div className="bg-bg py-2" title={title || undefined}>
-      <div className="text-sm tabular-nums">{value}</div>
-      <div className="text-[10px] uppercase tracking-wide text-faint">{label}</div>
-    </div>
-  );
+// lineTone picks out the lines worth seeing in a wall of modded-server noise.
+function lineTone(l: string): string {
+  if (/\b(ERROR|FATAL|SEVERE)\b|Exception|^\s+at |\tat /.test(l)) return "text-bad";
+  if (/\bWARN(ING)?\b/.test(l)) return "text-warn";
+  if (/Done \(|joined the game|left the game/.test(l)) return "text-ink";
+  return "";
 }
 
-// LogPane is the tail of the server's own log file. It needs no RCON, which is
-// why it is its own tab: watching the log is the common case and it should not
-// cost a connection. The pane follows the tail unless you scroll up, which is
-// the one behaviour that makes a log readable.
-function LogPane({ name, extra }: { name: string; extra?: string[] }) {
+// Console is the server's log as a terminal, with the RCON prompt at the end
+// of it. Reading the log needs no connection. The RCON connection opens the
+// first time the prompt gets focus and is held until the tab goes away:
+// nothing should open one just because a screen was looked at, and a
+// connection per command wrote a connect and a disconnect line every time.
+function Console({ name, inst, online }: { name: string; inst?: Instance; online: boolean }) {
+  const qc = useQueryClient();
   const logs = useQuery({
     queryKey: ["logs", name],
     queryFn: () => api.logs(name),
-    refetchInterval: 4000,
+    refetchInterval: online ? 2500 : 8000,
   });
-
-  const body =
-    (logs.data ?? (logs.error ? String(logs.error) : "…")) +
-    (extra?.length ? "\n" + extra.join("\n") : "");
-
-  const pane = useRef<HTMLPreElement>(null);
-  const stick = useRef(true);
-
-  // Record whether the user was already at the bottom before the new text
-  // lands, otherwise the check always sees the post-update scroll height.
-  const onScroll = () => {
-    const el = pane.current;
-    if (!el) return;
-    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-  };
-  useLayoutEffect(() => {
-    const el = pane.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
-  }, [body]);
-
-  return (
-    <pre
-      ref={pane}
-      onScroll={onScroll}
-      className="mx-4 mt-3 min-h-0 flex-1 overflow-auto rounded border border-edge bg-panel p-3 text-[11px] leading-relaxed text-mute"
-    >
-      {body}
-    </pre>
-  );
-}
-
-// Console is the log pane plus an RCON input. Opening this tab is what opens
-// the connection, and it is held until the tab goes away: a connection per
-// command wrote a connect and a disconnect line into the server log every few
-// seconds and buried everything else.
-function Console({
-  name,
-  inst,
-  online,
-}: {
-  name: string;
-  inst?: Instance;
-  online: boolean;
-}) {
-  const qc = useQueryClient();
-  const [sent, setSent] = useState<string[]>([]);
+  const [sent, setSent] = useState<{ cmd: string; reply: string; err?: boolean }[]>([]);
   const [cmd, setCmd] = useState("");
+  const history = useRef<string[]>([]);
+  const cursor = useRef(-1);
+  const input = useRef<HTMLInputElement>(null);
 
   const rconOff = !inst?.rcon_ready;
+  const [rcon, setRcon] = useState<"idle" | "opening" | "open" | "failed">("idle");
+  const [rconErr, setRconErr] = useState("");
+  const opened = useRef(false);
 
-  const [connectError, setConnectError] = useState<string | null>(null);
-  useEffect(() => {
-    if (rconOff || !online) return;
-    let gone = false;
+  const connect = () => {
+    if (opened.current || rconOff || !online) return;
+    opened.current = true;
+    setRcon("opening");
     api
       .openConsole(name)
-      .then(() => !gone && setConnectError(null))
-      .catch((e: Error) => !gone && setConnectError(e.message));
-    return () => {
-      gone = true;
-      // Hang up on the way out. Best effort: if the tab is being closed the
-      // request may never land, and the agent drops idle sessions anyway.
-      api.closeConsole(name).catch(() => {});
-      qc.invalidateQueries({ queryKey: ["stats", name] });
-    };
-  }, [name, rconOff, online, qc]);
+      .then(() => {
+        setRcon("open");
+        qc.invalidateQueries({ queryKey: ["stats", name] });
+      })
+      .catch((e: Error) => {
+        opened.current = false;
+        setRcon("failed");
+        setRconErr(e.message);
+      });
+  };
+
+  useEffect(() => {
+    if (!online) {
+      opened.current = false;
+      setRcon("idle");
+    }
+  }, [online]);
+
+  // Hang up on the way out. Best effort: if the page is closing the request
+  // may never land, and the agent drops idle sessions anyway.
+  useEffect(
+    () => () => {
+      if (opened.current) {
+        api.closeConsole(name).catch(() => {});
+        qc.invalidateQueries({ queryKey: ["stats", name] });
+      }
+    },
+    [name, qc],
+  );
 
   const run = useMutation({
     mutationFn: (c: string) => api.console(name, c),
-    onSuccess: (res) => setSent((s) => [...s, `> ${res.command}`, res.reply || "(no reply)"]),
-    onError: (e: Error, c) => setSent((s) => [...s, `> ${c}`, e.message]),
+    onSuccess: (res) => setSent((s) => [...s, { cmd: res.command, reply: res.reply }]),
+    onError: (e: Error, c) => setSent((s) => [...s, { cmd: c, reply: e.message, err: true }]),
   });
 
   const enable = useMutation({
@@ -392,58 +612,172 @@ function Console({
     onSuccess: () => qc.invalidateQueries({ queryKey: ["instances"] }),
   });
 
-  return (
-    <>
-      <LogPane name={name} extra={sent} />
+  const lines = useMemo(
+    () => (logs.data ?? (logs.error ? String(logs.error) : "")).split("\n"),
+    [logs.data, logs.error],
+  );
 
-      {rconOff ? (
-        <div className="flex items-center gap-3 p-4">
-          <button
-            onClick={() => enable.mutate()}
-            disabled={enable.isPending}
-            className="rounded bg-panel px-3 py-1.5 text-sm text-ink disabled:opacity-30"
-          >
-            turn on the console
-          </button>
-          <span className="text-xs text-mute">
-            writes three lines into server.properties, effective next restart
-          </span>
-        </div>
-      ) : (
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (!cmd.trim()) return;
-            run.mutate(cmd.trim());
-            setCmd("");
+  const pane = useRef<HTMLDivElement>(null);
+  const stick = useRef(true);
+  const [away, setAway] = useState(false);
+
+  // Record whether the reader was at the bottom before new text lands,
+  // otherwise the check always sees the post-update scroll height.
+  const onScroll = () => {
+    const el = pane.current;
+    if (!el) return;
+    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    setAway(!stick.current);
+  };
+  useLayoutEffect(() => {
+    const el = pane.current;
+    if (el && stick.current) el.scrollTop = el.scrollHeight;
+  }, [lines, sent, run.isPending, cmd]);
+
+  const jump = () => {
+    const el = pane.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    stick.current = true;
+    setAway(false);
+  };
+
+  const submit = () => {
+    const c = cmd.trim();
+    if (!c || run.isPending) return;
+    history.current = [c, ...history.current.filter((h) => h !== c)].slice(0, 50);
+    cursor.current = -1;
+    stick.current = true;
+    run.mutate(c);
+    setCmd("");
+  };
+
+  const title = `${inst?.dir?.replace(/^\/home\/[^/]+/, "~") ?? name} — latest.log`;
+  const right =
+    rcon === "open" ? (
+      <span className="flex items-center gap-1.5 font-mono text-[10.5px] text-live">
+        <Dot status="online" /> rcon
+      </span>
+    ) : rcon === "opening" ? (
+      <span className="font-mono text-[10.5px] text-faint">
+        <Spinner /> rcon
+      </span>
+    ) : (
+      <span className="font-mono text-[10.5px] text-faint">{online ? "tail -f" : "offline"}</span>
+    );
+
+  return (
+    <div className="relative flex min-h-0 flex-1 flex-col p-3 sm:p-6">
+      <Window title={title} right={right} className="flex-1">
+        <div
+          ref={pane}
+          onScroll={onScroll}
+          // A click anywhere that is not a text selection goes to the prompt,
+          // the way a terminal behaves.
+          onMouseUp={() => {
+            if (!window.getSelection()?.toString()) input.current?.focus({ preventScroll: true });
           }}
-          className="flex gap-2 p-4"
+          className="scroll-quiet min-h-0 flex-1 overflow-auto px-4 py-3 font-mono text-[11.5px] leading-[1.75] text-faint"
         >
-          <input
-            value={cmd}
-            onChange={(e) => setCmd(e.target.value)}
-            placeholder={online ? "say hello" : "server is not running"}
-            disabled={!online}
-            className="flex-1 rounded border border-edge bg-panel px-3 py-2 font-mono text-xs outline-none focus:border-mute disabled:opacity-40"
-          />
-          <button
-            disabled={!online || run.isPending}
-            className="rounded bg-ink px-3 py-2 text-sm text-bg disabled:opacity-30"
-          >
-            run
-          </button>
-        </form>
+          {logs.isPending && (
+            <div>
+              <Spinner /> reading the log
+            </div>
+          )}
+          {lines.map((l, i) => (
+            <div key={i} className={`whitespace-pre-wrap break-all ${lineTone(l)}`}>
+              {l || " "}
+            </div>
+          ))}
+          {sent.map((s, i) => (
+            <div key={`s${i}`}>
+              <div className="whitespace-pre-wrap break-all text-ink">
+                <span className="text-accent">&gt;</span> {s.cmd}
+              </div>
+              <div className={`whitespace-pre-wrap break-all ${s.err ? "text-bad" : "text-mute"}`}>
+                {s.reply || "(no reply)"}
+              </div>
+            </div>
+          ))}
+
+          {!online ? (
+            <div className="mt-1 text-faint"># the server is not running</div>
+          ) : rconOff ? (
+            <div className="mt-1 text-faint">
+              # the console is off.{" "}
+              <button
+                onClick={() => enable.mutate()}
+                disabled={enable.isPending}
+                className="text-accent underline underline-offset-4 hover:text-ink"
+              >
+                {enable.isPending ? "turning it on…" : "turn it on"}
+              </button>{" "}
+              (writes 3 lines into server.properties, takes effect on restart)
+              {enable.data?.restart_required && <div className="text-warn"># written. restart the server to connect.</div>}
+              {enable.error && <div className="text-bad"># {enable.error.message}</div>}
+            </div>
+          ) : (
+            <label className="prompt relative mt-1 flex cursor-text items-baseline whitespace-pre-wrap break-all text-ink">
+              <span className="mr-[1ch] shrink-0 text-accent">&gt;</span>
+              <span className="min-w-0">
+                {run.isPending ? (
+                  <>
+                    {history.current[0]} <Spinner className="text-faint" />
+                  </>
+                ) : (
+                  <>
+                    {cmd}
+                    <span className="cursor" />
+                    {!cmd && rcon !== "open" && (
+                      <span className="ml-[1ch] text-faint">
+                        {rcon === "failed" ? `rcon did not answer: ${rconErr}` : "type a command"}
+                      </span>
+                    )}
+                  </>
+                )}
+              </span>
+              <input
+                ref={input}
+                value={cmd}
+                onFocus={connect}
+                onChange={(e) => setCmd(e.target.value)}
+                // Enter sends; up and down walk back through what was sent.
+                onKeyDown={(e) => {
+                  const h = history.current;
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    submit();
+                  } else if (e.key === "ArrowUp" && cursor.current < h.length - 1) {
+                    e.preventDefault();
+                    cursor.current++;
+                    setCmd(h[cursor.current]);
+                  } else if (e.key === "ArrowDown" && cursor.current >= 0) {
+                    e.preventDefault();
+                    cursor.current--;
+                    setCmd(cursor.current < 0 ? "" : h[cursor.current]);
+                  }
+                }}
+                aria-label="Server command"
+                autoCapitalize="off"
+                autoCorrect="off"
+                autoComplete="off"
+                spellCheck={false}
+                enterKeyHint="send"
+                className="absolute inset-0 w-full cursor-text opacity-0"
+              />
+            </label>
+          )}
+        </div>
+      </Window>
+      {away && (
+        <button
+          onClick={jump}
+          className="absolute bottom-6 right-7 rounded border border-edge-strong bg-term px-2.5 py-1 font-mono text-[10.5px] text-mute hover:text-ink sm:bottom-9 sm:right-10"
+        >
+          ↓ latest
+        </button>
       )}
-      {connectError && (
-        <p className="px-4 pb-4 text-xs text-warn">rcon did not answer: {connectError}</p>
-      )}
-      {enable.data?.restart_required && (
-        <p className="px-4 pb-4 text-xs text-warn">
-          written. restart the server for the console to connect.
-        </p>
-      )}
-      {enable.error && <Problem error={enable.error} />}
-    </>
+    </div>
   );
 }
 
@@ -472,10 +806,7 @@ function Backups({
   };
 
   const list = useQuery({ queryKey: ["backups", name], queryFn: () => api.backups(name) });
-  const rollbacks = useQuery({
-    queryKey: ["rollbacks", name],
-    queryFn: () => api.rollbacks(name),
-  });
+  const rollbacks = useQuery({ queryKey: ["rollbacks", name], queryFn: () => api.rollbacks(name) });
 
   const create = useMutation({
     // The file names are captured before the command goes out, so the watch
@@ -487,22 +818,10 @@ function Backups({
     },
     onSuccess: ({ known }) => onStarted(known),
   });
-  const rollback = useMutation({
-    mutationFn: (file: string) => api.restoreBackup(name, file),
-    onSuccess: refresh,
-  });
-  const undo = useMutation({
-    mutationFn: (dir: string) => api.undoRollback(name, dir),
-    onSuccess: refresh,
-  });
-  const dropRollback = useMutation({
-    mutationFn: (dir: string) => api.deleteRollback(name, dir),
-    onSuccess: refresh,
-  });
-  const dropBackup = useMutation({
-    mutationFn: (file: string) => api.deleteBackup(name, file),
-    onSuccess: refresh,
-  });
+  const rollback = useMutation({ mutationFn: (file: string) => api.restoreBackup(name, file), onSuccess: refresh });
+  const undo = useMutation({ mutationFn: (dir: string) => api.undoRollback(name, dir), onSuccess: refresh });
+  const dropRollback = useMutation({ mutationFn: (dir: string) => api.deleteRollback(name, dir), onSuccess: refresh });
+  const dropBackup = useMutation({ mutationFn: (file: string) => api.deleteBackup(name, file), onSuccess: refresh });
 
   const [confirming, setConfirming] = useState<Backup | null>(null);
   const [droppingRollback, setDroppingRollback] = useState<string | null>(null);
@@ -511,65 +830,64 @@ function Backups({
   const backingUp = create.isPending || watching;
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto p-4">
-      <div className="mb-4 flex items-center gap-3">
-        <button
+    <div className="scroll-quiet min-h-0 flex-1 overflow-y-auto">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-edge px-4 py-4 sm:px-6">
+        <Button
+          variant="primary"
           onClick={() => create.mutate()}
           disabled={!online || !rconReady || backingUp || working}
-          className="flex items-center gap-2 rounded bg-panel px-3 py-1.5 text-sm text-ink disabled:opacity-30"
+          busy={backingUp}
         >
-          {backingUp && <Spinner />}
-          {backingUp ? "backing up" : "back up now"}
-        </button>
-        <span className="text-xs text-mute">
+          {backingUp ? "Backing up" : "Back up now"}
+        </Button>
+        <Hint className="min-w-0 flex-1">
           {!rconReady
-            ? "needs the console turned on"
+            ? "Needs the console turned on."
             : !online
-              ? "the server has to be running"
+              ? "The server has to be running."
               : create.isPending
-                ? "asking the server…"
+                ? "Asking the server…"
                 : watching
-                  ? "the mod is zipping the world, this can take a minute"
-                  : "runs the server's own backup command"}
-        </span>
+                  ? "The mod is zipping the world. This can take a minute."
+                  : "Runs the server's own backup command."}
+        </Hint>
       </div>
 
-      {create.error && <Problem error={create.error} />}
-      {rollback.error && <Problem error={rollback.error} />}
-      {undo.error && <Problem error={undo.error} />}
-      {dropRollback.error && <Problem error={dropRollback.error} />}
-      {dropBackup.error && <Problem error={dropBackup.error} />}
-      {gaveUp && (
-        <p className="mb-3 rounded border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">
-          no new backup showed up after three minutes. the command was sent, so check the console
-          for what the mod said.
-        </p>
-      )}
-      {working && (
-        <p className="mb-3 rounded border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">
-          working. this stops the server, swaps the world and starts it again, so it takes a few
-          minutes. do not reload.
-        </p>
-      )}
-      {rollback.data && (
-        <p className="mb-3 rounded border border-edge bg-panel px-3 py-2 text-xs text-mute">
-          rolled back. the world you had is kept as {rollback.data.previous_world}
-          {rollback.data.restarted && ", server started again"}
-        </p>
-      )}
-      {undo.data && (
-        <p className="mb-3 rounded border border-edge bg-panel px-3 py-2 text-xs text-mute">
-          put back. the world you had is kept as {undo.data.previous_world}
-          {undo.data.restarted && ", server started again"}
-        </p>
-      )}
+      <div className="px-4 sm:px-6">
+        {create.error && <Problem error={create.error} />}
+        {rollback.error && <Problem error={rollback.error} />}
+        {undo.error && <Problem error={undo.error} />}
+        {dropRollback.error && <Problem error={dropRollback.error} />}
+        {dropBackup.error && <Problem error={dropBackup.error} />}
+        {gaveUp && (
+          <Notice tone="warn">
+            No new backup showed up after three minutes. The command was sent, so check the console
+            for what the mod said.
+          </Notice>
+        )}
+        {working && (
+          <Notice tone="warn">
+            Working. This stops the server, swaps the world and starts it again, so it takes a few
+            minutes. Do not reload.
+          </Notice>
+        )}
+        {rollback.data && (
+          <Notice>
+            Rolled back. The world you had is kept as {rollback.data.previous_world}
+            {rollback.data.restarted && ", and the server is starting again"}.
+          </Notice>
+        )}
+        {undo.data && (
+          <Notice>
+            Put back. The world you had is kept as {undo.data.previous_world}
+            {undo.data.restarted && ", and the server is starting again"}.
+          </Notice>
+        )}
+      </div>
 
       {rollbacks.data && rollbacks.data.length > 0 && (
-        <section className="mb-6">
-          <h2 className="mb-2 text-xs text-warn">
-            worlds saved before a rollback · {rollbacks.data.length}
-          </h2>
-          <ul className="space-y-2">
+        <Section title="Worlds saved before a rollback" aside={<Label>kept until you delete them</Label>}>
+          <ul>
             {rollbacks.data.map((r) => (
               <RollbackRow
                 key={r.dir}
@@ -586,132 +904,116 @@ function Backups({
               />
             ))}
           </ul>
-          <p className="mt-2 text-[11px] text-faint">
-            kept until you delete them. nothing removes these on its own.
-          </p>
-        </section>
+        </Section>
       )}
 
-      <h2 className="mb-2 text-xs text-mute">backups the server made</h2>
-      <ul className="space-y-2">
-        {watching && <PendingRow />}
-        {list.data?.map((b) => (
-          <BackupRow
-            key={b.file}
-            b={b}
-            busy={working || dropBackup.isPending}
-            isNew={b.file === freshFile}
-            confirmingDelete={droppingBackup === b.file}
-            onAsk={() => setConfirming(b)}
-            onAskDelete={() => setDroppingBackup(b.file)}
-            onCancelDelete={() => setDroppingBackup(null)}
-            onDelete={() => {
-              setDroppingBackup(null);
-              dropBackup.mutate(b.file);
-            }}
-          />
-        ))}
-      </ul>
-      {list.data?.length === 0 && !watching && (
-        <p className="text-xs text-mute">no backups on disk</p>
-      )}
-      {list.data && list.data.length > 0 && (
-        <p className="mt-2 text-[11px] text-faint">
-          the backup mod keeps the newest 5 and deletes the rest on its own.
-        </p>
-      )}
+      <Section title="Backups" aside={list.data?.length ? <Label>the mod keeps the newest 5</Label> : undefined}>
+        <ul>
+          {watching && (
+            <li className="flex items-center gap-4 border-b border-edge px-4 py-3 sm:px-6">
+              <span className="flex size-10 shrink-0 items-center justify-center border border-dashed border-edge-strong text-accent">
+                <Spinner />
+              </span>
+              <span className="font-mono text-[11px] text-mute">zipping the world…</span>
+            </li>
+          )}
+          {list.data?.map((b) => (
+            <BackupRow
+              key={b.file}
+              b={b}
+              busy={working || dropBackup.isPending}
+              isNew={b.file === freshFile}
+              confirmingDelete={droppingBackup === b.file}
+              onAsk={() => setConfirming(b)}
+              onAskDelete={() => setDroppingBackup(b.file)}
+              onCancelDelete={() => setDroppingBackup(null)}
+              onDelete={() => {
+                setDroppingBackup(null);
+                dropBackup.mutate(b.file);
+              }}
+            />
+          ))}
+        </ul>
+        {list.data?.length === 0 && !watching && (
+          <Hint className="px-4 py-5 sm:px-6">No backups on disk yet. They show up here once the server makes one.</Hint>
+        )}
+      </Section>
 
       {confirming && (
-        <ConfirmRollback
-          b={confirming}
+        <Sheet
+          title={`Roll back to ${fmtDate(confirming.created)}?`}
           onCancel={() => setConfirming(null)}
-          onGo={() => {
-            const file = confirming.file;
-            setConfirming(null);
-            rollback.mutate(file);
-          }}
-        />
+          actions={
+            <>
+              <Button variant="ghost" onClick={() => setConfirming(null)}>
+                Cancel
+              </Button>
+              <Button
+                variant="danger"
+                onClick={() => {
+                  const file = confirming.file;
+                  setConfirming(null);
+                  rollback.mutate(file);
+                }}
+              >
+                Roll back
+              </Button>
+            </>
+          }
+        >
+          {since(confirming.created)} of play since then is gone: blocks, inventories, quests,
+          everything. The world you have now is kept as a copy you can put back.
+        </Sheet>
       )}
     </div>
   );
 }
 
-// PendingRow stands in for the file the mod has not finished writing, so the
-// list shows the backup arriving instead of sitting unchanged for a minute.
-function PendingRow() {
-  return (
-    <li className="flex items-center gap-3 rounded border border-dashed border-edge p-2">
-      <span className="flex size-12 shrink-0 items-center justify-center rounded bg-edge">
-        <Spinner />
-      </span>
-      <div className="min-w-0 flex-1">
-        <div className="text-xs text-mute">zipping the world…</div>
-        <div className="text-[11px] text-faint">appears here when the mod is done</div>
-      </div>
-    </li>
+function Thumb({ src }: { src?: string }) {
+  // FTB Backups 2 stores a map thumbnail in backups.json.
+  return src ? (
+    <img src={src} alt="" className="size-10 shrink-0 border border-edge object-cover [image-rendering:pixelated]" />
+  ) : (
+    <span className="size-10 shrink-0 border border-edge bg-panel" />
   );
 }
 
-// NewBackup is the pop that confirms the file landed. It carries the map
-// thumbnail so it is obvious which world was captured.
+// NewBackup confirms the file landed, with the map thumbnail so it is obvious
+// which world was captured.
 function NewBackup({ b, onClose }: { b: Backup; onClose: () => void }) {
-  // Long enough to read, short enough not to sit over the list.
   useEffect(() => {
     const t = setTimeout(onClose, 12_000);
     return () => clearTimeout(t);
   }, [onClose]);
 
   return (
-    <div className="fixed inset-x-0 bottom-0 z-20 p-4">
-      <div className="mx-auto flex max-w-3xl items-center gap-3 rounded border border-live/40 bg-panel p-3 shadow-lg">
-        {b.preview ? (
-          <img src={b.preview} alt="" className="size-12 shrink-0 rounded object-cover" />
-        ) : (
-          <span className="size-12 shrink-0 rounded bg-edge" />
-        )}
+    <div className="fixed bottom-0 right-0 z-20 w-full p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:w-96 sm:p-6">
+      <div role="status" className="flex items-center gap-3 rounded-md border border-live/60 bg-bg p-3">
+        <Thumb src={b.preview} />
         <div className="min-w-0 flex-1">
-          <div className="text-sm text-live">backup done</div>
-          <div className="truncate text-[11px] text-mute">
-            {new Date(b.created).toLocaleString()} · {bytes(b.size)}
+          <div className="text-[13px] font-medium text-live">Backup done</div>
+          <div className="truncate font-mono text-[10.5px] text-faint">
+            {fmtDate(b.created)} {bytes(b.size)}
           </div>
         </div>
-        <button onClick={onClose} className="shrink-0 px-2 text-xs text-mute hover:text-ink">
-          dismiss
-        </button>
+        <Button variant="ghost" size="sm" onClick={onClose}>
+          Dismiss
+        </Button>
       </div>
     </div>
   );
 }
 
-// ConfirmRollback sits at the bottom of the screen rather than where the
-// button was, so the second tap never lands on the spot the first one just
-// left. It names what goes, not what the button does.
-function ConfirmRollback({
-  b,
-  onCancel,
-  onGo,
-}: {
-  b: Backup;
-  onCancel: () => void;
-  onGo: () => void;
-}) {
+function DeleteConfirm({ question, onDelete, onCancel }: { question: string; onDelete: () => void; onCancel: () => void }) {
   return (
-    <div className="fixed inset-x-0 bottom-0 z-10 border-t border-edge bg-panel p-4">
-      <div className="mx-auto max-w-3xl">
-        <p className="text-sm">Roll back to {new Date(b.created).toLocaleString()}?</p>
-        <p className="mt-1 text-xs text-mute">
-          {since(b.created)} of play since then is gone: blocks, inventories, quests, everything.
-          The world you have now is kept as a copy you can put back.
-        </p>
-        <div className="mt-3 flex gap-2">
-          <button onClick={onCancel} className="rounded bg-panel px-3 py-2 text-sm text-mute">
-            cancel
-          </button>
-          <button onClick={onGo} className="rounded bg-bad/20 px-3 py-2 text-sm text-bad">
-            roll back
-          </button>
-        </div>
-      </div>
+    <div className="flex flex-wrap items-center gap-2 border-t border-dashed border-edge px-4 py-2.5 sm:px-6">
+      <span className="min-w-0 flex-1 text-[12.5px] text-bad">{question}</span>
+      <Button size="sm" variant="ghost" onClick={onCancel}>
+        Cancel
+      </Button>
+      <Button size="sm" variant="danger" onClick={onDelete}>
+        Delete
+      </Button>
     </div>
   );
 }
@@ -734,49 +1036,29 @@ function RollbackRow({
   onDelete: () => void;
 }) {
   return (
-    <li className="rounded border border-warn/30 bg-panel p-2">
-      <div className="flex items-center gap-3">
-        <span className="shrink-0 rounded bg-warn/15 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-warn">
-          pre-rollback
-        </span>
+    <li className="border-b border-edge last:border-b-0">
+      <div className="flex items-center gap-4 px-4 py-3 sm:px-6">
+        <span className="h-10 w-[2px] shrink-0 bg-warn" />
         <div className="min-w-0 flex-1">
-          <div className="truncate text-xs">{new Date(r.created).toLocaleString()}</div>
-          <div className="truncate text-[11px] text-faint">
-            {bytes(r.size_bytes)}
-            {r.replaced_by && ` · replaced by ${r.replaced_by}`}
+          <div className="truncate text-[13px]">{since(r.created)} ago</div>
+          <div className="truncate font-mono text-[10.5px] text-faint">
+            {fmtDate(r.created)} {bytes(r.size_bytes)}
+            {r.replaced_by && `, replaced by ${r.replaced_by}`}
           </div>
         </div>
         {!confirmingDelete && (
-          <div className="flex shrink-0 gap-3">
-            <button
-              onClick={onUndo}
-              disabled={busy}
-              className="text-xs text-ink underline underline-offset-2 disabled:opacity-30"
-            >
-              put back
-            </button>
-            <button
-              onClick={onAskDelete}
-              disabled={busy}
-              className="text-xs text-faint hover:text-bad disabled:opacity-30"
-            >
-              delete
-            </button>
+          <div className="flex shrink-0 gap-1.5">
+            <Button size="sm" onClick={onUndo} disabled={busy}>
+              Put back
+            </Button>
+            <Button size="sm" variant="ghost" onClick={onAskDelete} disabled={busy}>
+              Delete
+            </Button>
           </div>
         )}
       </div>
       {confirmingDelete && (
-        <div className="mt-2 flex items-center gap-2 border-t border-edge pt-2">
-          <span className="flex-1 text-[11px] text-bad">
-            delete this world for good? it is the only copy.
-          </span>
-          <button onClick={onDelete} className="rounded bg-bad/20 px-2 py-1 text-xs text-bad">
-            delete
-          </button>
-          <button onClick={onCancelDelete} className="px-2 py-1 text-xs text-mute">
-            cancel
-          </button>
-        </div>
+        <DeleteConfirm question="Delete this world for good? It is the only copy." onDelete={onDelete} onCancel={onCancelDelete} />
       )}
     </li>
   );
@@ -802,61 +1084,33 @@ function BackupRow({
   onDelete: () => void;
 }) {
   return (
-    <li
-      className={`rounded border bg-panel p-2 ${
-        isNew ? "border-live/50" : "border-edge"
-      }`}
-    >
-      <div className="flex items-center gap-3">
-        {/* FTB Backups 2 stores a map thumbnail in backups.json. */}
-        {b.preview ? (
-          <img src={b.preview} alt="" className="size-12 shrink-0 rounded object-cover" />
-        ) : (
-          <span className="size-12 shrink-0 rounded bg-edge" />
-        )}
+    <li className={`border-b border-edge last:border-b-0 ${isNew ? "bg-live/[0.05]" : ""}`}>
+      <div className="flex items-center gap-4 px-4 py-3 sm:px-6">
+        <Thumb src={b.preview} />
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="truncate text-xs">{since(b.created)} ago</span>
-            {isNew && (
-              <span className="shrink-0 rounded bg-live/15 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-live">
-                new
-              </span>
-            )}
+          <div className="flex items-center gap-2 text-[13px]">
+            <span className="truncate">{since(b.created)} ago</span>
+            {isNew && <span className="font-mono text-[10.5px] text-live">new</span>}
           </div>
-          <div className="truncate text-[11px] text-faint">
-            {new Date(b.created).toLocaleString()} · {bytes(b.size)}
+          <div className="truncate font-mono text-[10.5px] text-faint">
+            {fmtDate(b.created)}
+            <span className="sm:hidden"> {bytes(b.size)}</span>
           </div>
         </div>
+        <span className="hidden w-44 truncate font-mono text-[10.5px] text-faint xl:block">{b.version}</span>
+        <span className="hidden w-16 text-right font-mono text-[11px] text-mute sm:block">{bytes(b.size)}</span>
         {!confirmingDelete && (
-          <div className="flex shrink-0 gap-3">
-            <button
-              onClick={onAsk}
-              disabled={busy}
-              className="text-xs text-mute underline underline-offset-2 hover:text-ink disabled:opacity-30"
-            >
-              roll back
-            </button>
-            <button
-              onClick={onAskDelete}
-              disabled={busy}
-              className="text-xs text-faint hover:text-bad disabled:opacity-30"
-            >
-              delete
-            </button>
+          <div className="flex shrink-0 gap-1.5">
+            <Button size="sm" onClick={onAsk} disabled={busy}>
+              Roll back
+            </Button>
+            <Button size="sm" variant="ghost" onClick={onAskDelete} disabled={busy}>
+              Delete
+            </Button>
           </div>
         )}
       </div>
-      {confirmingDelete && (
-        <div className="mt-2 flex items-center gap-2 border-t border-edge pt-2">
-          <span className="flex-1 text-[11px] text-bad">delete this backup file?</span>
-          <button onClick={onDelete} className="rounded bg-bad/20 px-2 py-1 text-xs text-bad">
-            delete
-          </button>
-          <button onClick={onCancelDelete} className="px-2 py-1 text-xs text-mute">
-            cancel
-          </button>
-        </div>
-      )}
+      {confirmingDelete && <DeleteConfirm question="Delete this backup file?" onDelete={onDelete} onCancel={onCancelDelete} />}
     </li>
   );
 }
@@ -864,6 +1118,7 @@ function BackupRow({
 function SettingsScreen({ onBack }: { onBack: () => void }) {
   const qc = useQueryClient();
   const settings = useQuery({ queryKey: ["settings"], queryFn: api.settings });
+  const info = useQuery({ queryKey: ["info"], queryFn: api.info });
   const save = useMutation({
     mutationFn: (p: SettingsPatch) => api.saveSettings(p),
     onSuccess: (s) => {
@@ -875,80 +1130,124 @@ function SettingsScreen({ onBack }: { onBack: () => void }) {
   });
 
   const [key, setKey] = useState("");
+  const [releasing, setReleasing] = useState(false);
   const s = settings.data;
 
   return (
-    <main className="flex-1 overflow-y-auto p-4">
-      <button onClick={onBack} className="mb-4 text-sm text-mute hover:text-ink">
-        back
-      </button>
+    <div className="scroll-quiet min-h-0 flex-1 overflow-y-auto">
+      <div className="border-b border-edge px-4 pb-5 pt-4 sm:px-6">
+        <button onClick={onBack} className="mb-3 font-mono text-[11px] text-faint hover:text-ink md:hidden">
+          ← servers
+        </button>
+        <h1 className="display text-[40px] sm:text-[52px]">Settings</h1>
+      </div>
 
-      {settings.error && <Problem error={settings.error} />}
-      {save.error && <Problem error={save.error} />}
+      {(settings.error || save.error || info.data?.pm2_error) && (
+        <div className="px-4 sm:px-6">
+          {settings.error && <Problem error={settings.error} />}
+          {save.error && <Problem error={save.error} />}
+          {info.data?.pm2_error && <Notice tone="bad">pm2 did not answer: {info.data.pm2_error}</Notice>}
+        </div>
+      )}
 
       {s && (
-        <div className="space-y-5">
-          <Field
-            label="pm2"
-            value={s.pm2_bin}
-            detected={s.detected?.pm2_bin}
-            onSave={(v) => save.mutate({ pm2_bin: v })}
-          />
-          <Field
-            label="node bin dir"
-            value={s.node_bin_dir}
-            detected={s.detected?.node_bin_dir}
-            onSave={(v) => save.mutate({ node_bin_dir: v })}
-          />
-          <Field
-            label="servers root"
-            value={s.servers_root}
-            detected={s.detected?.servers_root}
-            onSave={(v) => save.mutate({ servers_root: v })}
-          />
+        <>
+          <Section title="Paths" aside={<Label>empty means detect it</Label>}>
+            <Field label="pm2" value={s.pm2_bin} detected={s.detected?.pm2_bin} onSave={(v) => save.mutate({ pm2_bin: v })} />
+            <Field
+              label="node bin folder"
+              value={s.node_bin_dir}
+              detected={s.detected?.node_bin_dir}
+              onSave={(v) => save.mutate({ node_bin_dir: v })}
+            />
+            <Field
+              label="servers root"
+              value={s.servers_root}
+              detected={s.detected?.servers_root}
+              onSave={(v) => save.mutate({ servers_root: v })}
+            />
+          </Section>
 
-          <div>
-            <label className="mb-1 block text-xs text-mute">
-              curseforge key {s.has_curseforge_key && "(stored)"}
-            </label>
-            <div className="flex gap-2">
+          <Section title="CurseForge" aside={<Label>{s.has_curseforge_key ? "key stored" : "no key"}</Label>}>
+            <form
+              className="grid items-center gap-x-4 gap-y-2 px-4 py-3 sm:grid-cols-[13rem_1fr_auto] sm:px-6"
+              onSubmit={(e) => {
+                e.preventDefault();
+                save.mutate({ curseforge_key: key });
+                setKey("");
+              }}
+            >
+              <Label className="text-mute">api key</Label>
               <input
                 type="password"
                 value={key}
                 onChange={(e) => setKey(e.target.value)}
-                placeholder={s.has_curseforge_key ? "•••• stored, paste to replace" : "paste key"}
-                className="flex-1 rounded border border-edge bg-panel px-3 py-2 text-sm outline-none focus:border-mute"
+                aria-label="CurseForge API key"
+                placeholder={s.has_curseforge_key ? "paste a new key to replace it" : "paste key"}
+                className="h-8 min-w-0 rounded border border-edge bg-term px-2.5 font-mono text-[12px] outline-none placeholder:text-faint focus:border-edge-strong"
               />
-              <button
-                onClick={() => {
-                  save.mutate({ curseforge_key: key });
-                  setKey("");
-                }}
-                className="rounded bg-ink px-3 py-2 text-sm text-bg"
-              >
-                save
-              </button>
-            </div>
-            <p className="mt-1 text-xs text-mute">
-              kept on this machine and never sent back to the browser
-            </p>
-          </div>
+              <Button disabled={!key.trim()}>Save</Button>
+            </form>
+            <Hint className="px-4 pb-3 sm:px-6">Kept on this machine. It is never sent back to the browser.</Hint>
+          </Section>
 
-          <div>
-            <p className="text-xs text-mute">owner</p>
-            <p className="text-sm">{s.owner || "unclaimed"}</p>
-            {s.owner && (
-              <button
-                onClick={() => save.mutate({ owner: "" })}
-                className="mt-1 text-xs text-bad underline underline-offset-2"
-              >
-                release, the next login to open this claims it
-              </button>
+          <Section title="Access">
+            <div className="grid items-center gap-x-4 gap-y-2 px-4 py-3 sm:grid-cols-[13rem_1fr_auto] sm:px-6">
+              <Label className="text-mute">owner</Label>
+              <span className="truncate font-mono text-[12px]">{s.owner || "unclaimed"}</span>
+              {s.owner && !releasing ? (
+                <Button size="sm" variant="danger" onClick={() => setReleasing(true)}>
+                  Release
+                </Button>
+              ) : (
+                <span />
+              )}
+            </div>
+            {releasing && (
+              <DeleteConfirm
+                question="The next tailnet login to open Conduit becomes the owner."
+                onCancel={() => setReleasing(false)}
+                onDelete={() => {
+                  setReleasing(false);
+                  save.mutate({ owner: "" });
+                }}
+              />
             )}
-          </div>
-        </div>
+            <div className="border-t border-edge px-4 py-3 sm:px-6">
+              <Hint>Let someone else in, from a shell on this machine:</Hint>
+              <code className="mt-1.5 block font-mono text-[11.5px] text-mute">
+                <span className="text-accent">$</span> conduitd --allow friend@example.com
+              </code>
+            </div>
+          </Section>
+
+          {info.data && (
+            <Section title="This machine">
+              <dl className="grid grid-cols-2 lg:grid-cols-4">
+                {[
+                  ["conduit", info.data.version ?? "dev"],
+                  ["pm2", info.data.pm2 || "—"],
+                  ["platform", `${info.data.os ?? ""}/${info.data.arch}`],
+                  ["signed in as", info.data.user],
+                ].map(([l, v], i) => (
+                  <div
+                    key={l}
+                    className={`border-edge px-4 py-3 sm:px-6 ${i % 2 === 0 ? "border-r" : ""} ${
+                      i < 2 ? "border-b lg:border-b-0" : ""
+                    } lg:border-r lg:last:border-r-0`}
+                  >
+                    <dt>
+                      <Label>{l}</Label>
+                    </dt>
+                    <dd className="mt-1 truncate font-mono text-[13px]">{v}</dd>
+                  </div>
+                ))}
+              </dl>
+            </Section>
+          )}
+        </>
       )}
-    </main>
+    </div>
   );
 }
 
@@ -968,28 +1267,34 @@ function Field({
   const [draft, setDraft] = useState<string | null>(null);
   const shown = draft ?? (detected ? "" : value);
   return (
-    <div>
-      <label className="mb-1 block text-xs text-mute">
-        {label} {detected && <span className="text-live">detected</span>}
-      </label>
-      <div className="flex gap-2">
-        <input
-          value={shown}
-          placeholder={value || "not found"}
-          onChange={(e) => setDraft(e.target.value)}
-          className="flex-1 rounded border border-edge bg-panel px-3 py-2 font-mono text-xs outline-none focus:border-mute"
-        />
-        <button
-          onClick={() => {
-            onSave(shown);
-            setDraft(null);
-          }}
-          className="rounded bg-panel px-3 py-2 text-sm text-mute"
-        >
-          save
-        </button>
-      </div>
-    </div>
+    <form
+      className="grid items-center gap-x-4 gap-y-2 border-b border-edge px-4 py-3 last:border-b-0 sm:grid-cols-[13rem_1fr_auto] sm:px-6"
+      onSubmit={(e) => {
+        e.preventDefault();
+        onSave(shown);
+        setDraft(null);
+      }}
+    >
+      <span className="flex items-baseline gap-2">
+        <Label className="text-mute">{label}</Label>
+        {detected ? (
+          <Label className="text-live">detected</Label>
+        ) : value ? (
+          <Label>set by you</Label>
+        ) : (
+          <Label className="text-bad">not found</Label>
+        )}
+      </span>
+      <input
+        value={shown}
+        placeholder={value || "not found"}
+        onChange={(e) => setDraft(e.target.value)}
+        aria-label={label}
+        spellCheck={false}
+        autoCapitalize="off"
+        className="h-8 min-w-0 rounded border border-edge bg-term px-2.5 font-mono text-[12px] outline-none placeholder:text-faint focus:border-edge-strong"
+      />
+      <Button disabled={draft === null}>Save</Button>
+    </form>
   );
 }
-
